@@ -152,12 +152,11 @@ def plot_golf_shots(
 
         ax2.axhline(0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
         ax2.set_xlabel("Shot #", labelpad=12, fontsize=14)
-        ax2.set_ylabel(
-            "Horiz. Launch Angle (deg)\n" + r"[Right ($-$), Left ($+$)]",
-            labelpad=12,
-            fontsize=12,
-        )
+        ax2.set_ylabel("Horiz. Launch Angle (deg)", labelpad=12, fontsize=12)
         ax2.set_ylim(-35, 35)
+
+        ax2.text(0.02, 0.02, "R", transform=ax2.transAxes, fontsize=18, fontweight="bold", ha="left", va="bottom")
+        ax2.text(0.02, 0.98, "L", transform=ax2.transAxes, fontsize=18, fontweight="bold", ha="left", va="top")
 
         # 2段目の凡例（Launch Angle）
         legend_handles2 = [
