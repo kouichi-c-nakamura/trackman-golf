@@ -14,6 +14,7 @@ def plot_golf_shots(
     height_scale=10,  # 最高到達点の円サイズ倍率
     launch_scale=5,  # 打出角の円サイズ倍率
     save_path=None,  # 保存先ファイルパス (例: 'output.png')
+    title=None,  # 図のタイトル（例: '2026-08-12'）
 ):
     """ゴルフショットのデータを散布図化する関数
 
@@ -39,6 +40,8 @@ def plot_golf_shots(
         打出角を散布図の円面積(s)に変換する倍率
     save_path : str, optional
         画像を保存する場合のファイル名
+    title : str, optional
+        フィギュア上部に表示するタイトル（例: '2026-08-12'）
     """
     # データの読み込み・コピー
     if isinstance(df_or_path, str):
@@ -187,6 +190,10 @@ def plot_golf_shots(
     cbar_ax = fig.add_axes([0.80, 0.15, 0.03, 0.7])
     cbar = fig.colorbar(scatter1, cax=cbar_ax)
     cbar.set_label("Ball Speed (m/s)", fontsize=14)
+
+    # 図タイトル（任意）
+    if title is not None:
+        fig.suptitle(title, y=0.98, fontsize=16)
 
     # 保存処理
     if save_path:
