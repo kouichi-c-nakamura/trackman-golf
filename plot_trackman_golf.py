@@ -6,7 +6,7 @@ import pandas as pd
 def plot_golf_shots(
     df_or_path,
     mode="two_panel",  # 'two_panel' (二段組) または 'single' (上段のみ)
-    xlim=(0, 60),
+    xlim=None,  # None の場合は (0, len(df) + 5)
     carry_ylim=(0, 150),
     ball_speed_lim=(0, 50),
     peak_height_samples=[5, 10, 15, 20, 30],
@@ -16,33 +16,7 @@ def plot_golf_shots(
     save_path=None,  # 保存先ファイルパス (例: 'output.png')
     title=None,  # 図のタイトル（例: '2026-08-12'）
 ):
-    """ゴルフショットのデータを散布図化する関数
-
-    Parameters:
-    -----------
-    df_or_path : str or pd.DataFrame
-        CSVのファイルパス、または読み込み済みのDataFrame
-    mode : str, default 'two_panel'
-        'two_panel'（二段組）または 'single'（1段目のみ）
-    xlim : tuple, default (0, 60)
-        X軸（Shot #）の表示範囲
-    carry_ylim : tuple, default (0, 150)
-        1段目Y軸（キャリー）の表示範囲
-    ball_speed_lim : tuple, default (0, 50)
-        カラーバー（ボールスピード）の範囲 [vmin, vmax]
-    peak_height_samples : list, default [5, 10, 15, 20, 30]
-        1段目の凡例（最高到達点 yds）に表示する数値リスト
-    launch_angle_samples : list, default [10, 20, 30, 40]
-        2段目の凡例（打出角 °）に表示する数値リスト
-    height_scale : float, default 10
-        最高到達点を散布図の円面積(s)に変換する倍率
-    launch_scale : float, default 5
-        打出角を散布図の円面積(s)に変換する倍率
-    save_path : str, optional
-        画像を保存する場合のファイル名
-    title : str, optional
-        フィギュア上部に表示するタイトル（例: '2026-08-12'）
-    """
+    """ゴルフショットのデータを散布図化する関数"""
     # データの読み込み・コピー
     if isinstance(df_or_path, str):
         df = pd.read_csv(df_or_path)
@@ -52,6 +26,10 @@ def plot_golf_shots(
     # No.列の確保 (1から連番)
     if "No." not in df.columns or df["No."].isnull().any():
         df["No."] = range(1, len(df) + 1)
+
+    # xlimの自動設定（未指定の場合はデータ件数 + 5）
+    if xlim is None:
+        xlim = (0, len(df) + 5)
 
     # 左右打出角の数値変換（左=プラス, 右=マイナス）
     def parse_left_right_y(val):
@@ -102,6 +80,24 @@ def plot_golf_shots(
         vmin=vmin,
         vmax=vmax,
     )
+
+    # 最大キャリー値のテキスト追加
+    if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].empty:
+        max_idx = df["キャリー (yds)"].idxmax()
+        max_carry = df.loc[max_idx, "キャリー (yds)"]
+        max_no = df.loc[max_idx, "No."]
+
+        # 散布図の円の少し右側（x + 0.5）に数値を表示
+        ax1.text(
+            max_no,
+            max_carry + 10,
+            f"{int(round(max_carry))} yds",
+            fontsize=10,
+            fontweight="normal",
+            va="center",
+            ha="center",
+            color="black",
+        )
 
     ax1.set_xlabel("Shot #", labelpad=12, fontsize=14)
     ax1.set_ylabel("Carry (yds)", labelpad=14, fontsize=12)
@@ -155,8 +151,26 @@ def plot_golf_shots(
         ax2.set_ylabel("Horiz. Launch Angle (deg)", labelpad=12, fontsize=12)
         ax2.set_ylim(-35, 35)
 
-        ax2.text(0.02, 0.02, "R", transform=ax2.transAxes, fontsize=18, fontweight="bold", ha="left", va="bottom")
-        ax2.text(0.02, 0.98, "L", transform=ax2.transAxes, fontsize=18, fontweight="bold", ha="left", va="top")
+        ax2.text(
+            0.02,
+            0.02,
+            "R",
+            transform=ax2.transAxes,
+            fontsize=18,
+            fontweight="bold",
+            ha="left",
+            va="bottom",
+        )
+        ax2.text(
+            0.02,
+            0.98,
+            "L",
+            transform=ax2.transAxes,
+            fontsize=18,
+            fontweight="bold",
+            ha="left",
+            va="top",
+        )
 
         # 2段目の凡例（Launch Angle）
         legend_handles2 = [
