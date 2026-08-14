@@ -24,10 +24,7 @@ def parse_left_right_y(val):
 
 
 def load_and_aggregate_trackman_data(root_dir="."):
-    """'YYYY-MM-DD range' 形式のフォルダを再帰的に検索して全CSVを統合し、
-
-    date列と全体ショット番号(global_shot_no)を追加する
-    """
+    """'YYYY-MM-DD range' 形式のフォルダを再帰的に検索して全CSVを統合"""
     date_folder_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})\s+range")
     root = Path(root_dir)
 
@@ -65,6 +62,14 @@ def load_and_aggregate_trackman_data(root_dir="."):
     full_df = pd.concat(dfs, ignore_index=True)
     full_df["global_shot_no"] = range(1, len(full_df) + 1)
 
+    # Club-type の確保
+    if "Club-type" not in full_df.columns:
+        full_df["Club-type"] = "9i"
+    else:
+        full_df["Club-type"] = (
+            full_df["Club-type"].fillna("9i").astype(str).str.strip()
+        )
+
     if "左右打出角 (度)" in full_df.columns:
         full_df["左右打出角_y"] = full_df["左右打出角 (度)"].apply(
             parse_left_right_y
@@ -93,15 +98,23 @@ def plot_trackman_plotly(
     df,
     height_scale=1.0,
     launch_scale=0.6,
-    min_peak_height=3,  # 最高到達点の下限値 (yds)
-    min_launch_angle=5,  # 打出角の下限値 (deg)
-    peak_height_samples=[10, 20, 30],
-    launch_angle_samples=[10, 20, 30, 40],
+    min_peak_height=3,
+    min_launch_angle=5,
+    peak_height_samples=[3, 10, 20, 30],
+    launch_angle_samples=[5, 10, 20, 30, 40],
 ):
-    """Plotlyによる2段組インタラクティブ散布図 (最小バブルサイズ下限設定付き)"""
+    """Plotlyによる2段組インタラクティブ散布図"""
     if df.empty:
         print("DataFrame is empty.")
         return None
+
+    def get_club_symbol_and_label(club_name):
+        c = club_name.lower()
+        if c == "7i":
+            return "triangle-up", "7i"
+        elif c in ["driver", "1w", "dr"]:
+            return "square", "Driver"
+        return "circle", club_name
 
     fig = make_subplots(
         rows=2,
@@ -115,68 +128,118 @@ def plot_trackman_plotly(
     )
 
     # ツールチップ用テキスト
-    hover_top = [
-        f"<b>Date:</b> {row['date']}<br>"
-        f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
-        f"<b>Carry:</b> {row.get('キャリー (yds)', 'N/A')} yds<br>"
-        f"<b>Ball Speed:</b> {row.get('ボールスピード (m/s)', 'N/A')} m/s<br>"
-        f"<b>Peak Height:</b> {row['最高到達点_num']} yds"
-        for _, row in df.iterrows()
-    ]
+    hover_top = {
+        idx: (
+            f"<b>Date:</b> {row['date']}<br>"
+            f"<b>Club:</b> {row['Club-type']}<br>"
+            f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
+            f"<b>Carry:</b> {row.get('キャリー (yds)', 'N/A')} yds<br>"
+            f"<b>Ball Speed:</b> {row.get('ボールスピード (m/s)', 'N/A')} m/s<br>"
+            f"<b>Peak Height:</b> {row['最高到達点_num']} yds"
+        )
+        for idx, row in df.iterrows()
+    }
 
-    hover_bottom = [
-        f"<b>Date:</b> {row['date']}<br>"
-        f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
-        f"<b>Horiz. Launch:</b> {row['左右打出角_y']:.1f}°<br>"
-        f"<b>Ball Speed:</b> {row.get('ボールスピード (m/s)', 'N/A')} m/s<br>"
-        f"<b>Launch Angle:</b> {row['打出角_num']:.1f}°"
-        for _, row in df.iterrows()
-    ]
+    hover_bottom = {
+        idx: (
+            f"<b>Date:</b> {row['date']}<br>"
+            f"<b>Club:</b> {row['Club-type']}<br>"
+            f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
+            f"<b>Horiz. Launch:</b> {row['左右打出角_y']:.1f}°<br>"
+            f"<b>Ball Speed:</b> {row.get('ボールスピード (m/s)', 'N/A')} m/s<br>"
+            f"<b>Launch Angle:</b> {row['打出角_num']:.1f}°"
+        )
+        for idx, row in df.iterrows()
+    }
 
-    # --- 最小サイズの適用 (clip処理) ---
-    peak_height_sizes = (
+    # 最小サイズの適用 (clip処理)
+    df["peak_height_sizes"] = (
         df["最高到達点_num"].clip(lower=min_peak_height) * height_scale
     )
-    launch_angle_sizes = (
+    df["launch_angle_sizes"] = (
         df["打出角_num"].clip(lower=min_launch_angle) * launch_scale
     )
 
-    # --- 1段目 (Carry) ---
-    scatter1 = go.Scatter(
-        x=df["global_shot_no"],
-        y=df["キャリー (yds)"],
-        mode="markers",
-        hoverinfo="text",
-        hovertext=hover_top,
-        showlegend=False,
-        marker=dict(
-            size=peak_height_sizes,
-            color=df["ボールスピード (m/s)"],
-            colorscale="Blues",
-            cmin=0,
-            cmax=50,
-            showscale=True,
-            colorbar=dict(
-                title="Ball Speed (m/s)", x=1.02, len=0.85, y=0.5, yanchor="middle"
+    # --- 散布図プロット (ax1 & ax2) クラブごとに描画 ---
+    unique_clubs = df["Club-type"].unique()
+    colorbar_shown = False
+
+    for club in unique_clubs:
+        sub = df[df["Club-type"] == club]
+        sym, _ = get_club_symbol_and_label(club)
+
+        # 1段目 (Carry)
+        show_cbar = not colorbar_shown
+        scatter1 = go.Scatter(
+            x=sub["global_shot_no"],
+            y=sub["キャリー (yds)"],
+            mode="markers",
+            hoverinfo="text",
+            hovertext=[hover_top[idx] for idx in sub.index],
+            showlegend=False,
+            marker=dict(
+                symbol=sym,
+                size=sub["peak_height_sizes"],
+                color=sub["ボールスピード (m/s)"],
+                colorscale="Blues",
+                cmin=0,
+                cmax=50,
+                showscale=show_cbar,
+                colorbar=dict(
+                    title=dict(
+                        text="Ball Speed (m/s)",
+                        side="right",
+                        font=dict(size=13),
+                    ),
+                    thickness=15,
+                    x=1.02,
+                    len=0.85,
+                    y=0.5,
+                    yanchor="middle",
+                )
+                if show_cbar
+                else None,
+                line=dict(width=1, color="navy"),
+                opacity=0.8,
             ),
-            line=dict(width=1, color="navy"),
-            opacity=0.8,
-        ),
-        name="Carry",
-    )
-    fig.add_trace(scatter1, row=1, col=1)
+            name="Carry",
+        )
+        fig.add_trace(scatter1, row=1, col=1)
+        colorbar_shown = True
+
+        # 2段目 (左右打出角)
+        scatter2 = go.Scatter(
+            x=sub["global_shot_no"],
+            y=sub["左右打出角_y"],
+            mode="markers",
+            hoverinfo="text",
+            hovertext=[hover_bottom[idx] for idx in sub.index],
+            showlegend=False,
+            marker=dict(
+                symbol=sym,
+                size=sub["launch_angle_sizes"],
+                color=sub["ボールスピード (m/s)"],
+                colorscale="Blues",
+                cmin=0,
+                cmax=50,
+                showscale=False,
+                line=dict(width=1, color="navy"),
+                opacity=0.8,
+            ),
+            name="Horiz Launch Angle",
+        )
+        fig.add_trace(scatter2, row=2, col=1)
 
     # 最大キャリー値注釈
     if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].empty:
         max_idx = df["キャリー (yds)"].idxmax()
         max_carry = df.loc[max_idx, "キャリー (yds)"]
         max_x = df.loc[max_idx, "global_shot_no"]
-        max_date = df.loc[max_idx, "date"]
 
         fig.add_annotation(
             x=max_x,
             y=max_carry,
-            text=f"<b>Max: {int(round(max_carry))} yds ({max_date})</b>",
+            text=f"<b>Max: {int(round(max_carry))} yds</b>",
             showarrow=True,
             arrowhead=2,
             arrowsize=1,
@@ -188,32 +251,65 @@ def plot_trackman_plotly(
             col=1,
         )
 
-    # --- 2段目 (左右打出角) ---
-    scatter2 = go.Scatter(
-        x=df["global_shot_no"],
-        y=df["左右打出角_y"],
-        mode="markers",
-        hoverinfo="text",
-        hovertext=hover_bottom,
-        showlegend=False,
-        marker=dict(
-            size=launch_angle_sizes,
-            color=df["ボールスピード (m/s)"],
-            colorscale="Blues",
-            cmin=0,
-            cmax=50,
-            showscale=False,
-            line=dict(width=1, color="navy"),
-            opacity=0.8,
-        ),
-        name="Horiz Launch Angle",
-    )
-    fig.add_trace(scatter2, row=2, col=1)
-
     # 中心線 (0度)
     fig.add_hline(
         y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1
     )
+
+    # --- 各セッションの区切り破線 ＆ 90°回転日付背景テキスト ---
+    unique_dates = df["date"].unique()
+    for i, date_str in enumerate(unique_dates):
+        sub = df[df["date"] == date_str]
+        start_x = sub["global_shot_no"].min()
+
+        if i > 0:
+            sep_x = start_x - 0.5
+            fig.add_vline(
+                x=sep_x,
+                line_dash="dot",
+                line_color="rgba(100, 100, 100, 0.6)",
+                line_width=1.5,
+                row=1,
+                col=1,
+            )
+            fig.add_vline(
+                x=sep_x,
+                line_dash="dot",
+                line_color="rgba(100, 100, 100, 0.6)",
+                line_width=1.5,
+                row=2,
+                col=1,
+            )
+
+        text_x = start_x - 0.2
+
+        # 1段目 (Carry) 背景日付テキスト
+        fig.add_annotation(
+            x=text_x,
+            y=0.95,
+            xref="x",
+            yref="y domain",
+            text=f"<b>{date_str}</b>",
+            showarrow=False,
+            textangle=-90,
+            font=dict(size=18, color="rgba(160, 160, 160, 0.45)"),
+            xanchor="left",
+            yanchor="top",
+        )
+
+        # 2段目 (Angle) 背景日付テキスト
+        fig.add_annotation(
+            x=text_x,
+            y=0.95,
+            xref="x",
+            yref="y2 domain",
+            text=f"<b>{date_str}</b>",
+            showarrow=False,
+            textangle=-90,
+            font=dict(size=18, color="rgba(160, 160, 160, 0.45)"),
+            xanchor="left",
+            yanchor="top",
+        )
 
     # --- フローティング L / R テキスト ---
     fig.add_annotation(
@@ -237,37 +333,43 @@ def plot_trackman_plotly(
         align="left",
     )
 
-    # --- 日付区切り線 ＆ 日付テキスト ---
-    unique_dates = df["date"].unique()
-    for i, date_str in enumerate(unique_dates):
-        sub = df[df["date"] == date_str]
-        start_x = sub["global_shot_no"].min()
-        end_x = sub["global_shot_no"].max()
-        center_x = (start_x + end_x) / 2
+    # --- 凡例1: Club-type 凡例 ---
+    ordered_clubs = []
+    for std_c in ["9i", "7i", "driver", "1w"]:
+        for c in unique_clubs:
+            if c.lower() == std_c and c not in ordered_clubs:
+                ordered_clubs.append(c)
+    for c in unique_clubs:
+        if c not in ordered_clubs:
+            ordered_clubs.append(c)
 
-        if i > 0:
-            sep_x = start_x - 0.5
-            fig.add_vline(
-                x=sep_x,
-                line_dash="dot",
-                line_color="rgba(120, 120, 120, 0.5)",
-                line_width=1.5,
+    for club in ordered_clubs:
+        sym, label = get_club_symbol_and_label(club)
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(
+                    symbol=sym,
+                    size=10,
+                    color="rgba(0,0,0,0)",
+                    line=dict(width=1.2, color="navy"),
+                ),
+                name=label,
+                legendgroup="club_type",
+                legendgrouptitle_text="<b>Club</b>",
+                showlegend=True,
             )
-
-        fig.add_annotation(
-            x=center_x,
-            y=1.03,
-            xref="x",
-            yref="paper",
-            text=f"<b>{date_str}</b>",
-            showarrow=False,
-            font=dict(size=12, color="#222222"),
-            align="center",
         )
 
-    # --- 円サイズ凡例 ---
+    # --- 凡例2: Peak Height 凡例 ---
     for h in peak_height_samples:
         size_val = max(h, min_peak_height) * height_scale
+        label_text = (
+            f"≤ {min_peak_height} yds" if h <= min_peak_height else f"{h} yds"
+        )
+
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -278,15 +380,20 @@ def plot_trackman_plotly(
                     color="rgba(0,0,0,0)",
                     line=dict(width=1.2, color="navy"),
                 ),
-                name=f"{h} yds",
+                name=label_text,
                 legendgroup="peak_height",
                 legendgrouptitle_text="<b>Peak Height</b>",
                 showlegend=True,
             )
         )
 
+    # --- 凡例3: Launch Angle 凡例 ---
     for a in launch_angle_samples:
         size_val = max(a, min_launch_angle) * launch_scale
+        label_text = (
+            f"≤ {min_launch_angle}°" if a <= min_launch_angle else f"{a}°"
+        )
+
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -297,14 +404,14 @@ def plot_trackman_plotly(
                     color="rgba(0,0,0,0)",
                     line=dict(width=1.2, color="navy"),
                 ),
-                name=f"{a}°",
+                name=label_text,
                 legendgroup="launch_angle",
                 legendgrouptitle_text="<b>Launch Angle</b>",
                 showlegend=True,
             )
         )
 
-    # --- 軸設定（Y軸は固定） ---
+    # --- 軸設定 ---
     fig.update_yaxes(
         title_text="Carry (yds)", range=[0, 160], fixedrange=True, row=1, col=1
     )
@@ -370,14 +477,14 @@ def plot_trackman_plotly(
         template="plotly_white",
         showlegend=True,
         legend=dict(
-            x=1.14,
+            x=1.08,  # 1.14から1.08に寄せてカラーバーとの隙間を50%削減
             y=0.5,
             yanchor="middle",
             title_font_size=12,
             bordercolor="rgba(0,0,0,0.1)",
             borderwidth=1,
         ),
-        margin=dict(t=120, b=60, l=80, r=220),
+        margin=dict(t=120, b=60, l=80, r=170),  # 余白を220から170にスリム化
     )
 
     return fig
@@ -392,3 +499,4 @@ if __name__ == "__main__":
     if not df_all.empty:
         fig = plot_trackman_plotly(df_all)
         fig.show()
+        fig.write_html("golf_range_analysis.html")
