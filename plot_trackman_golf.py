@@ -48,6 +48,20 @@ def plot_golf_shots(
     if "打出角 (度)" in df.columns:
         df["打出角_num"] = pd.to_numeric(df["打出角 (度)"], errors="coerce")
 
+    # Club-type 列の確保（未指定時はデフォルト 9i）
+    if "Club-type" not in df.columns:
+        df["Club-type"] = "9i"
+    else:
+        df["Club-type"] = df["Club-type"].fillna("9i").astype(str).str.strip()
+
+    def get_marker_and_label(club_name):
+        c = club_name.lower()
+        if c == "7i":
+            return "^", "7i"
+        elif c in ["driver", "1w", "dr"]:
+            return "s", "Driver"
+        return "o", club_name  # 9i and default
+
     # スタイル設定
     plt.rcParams["axes.spines.top"] = False
     plt.rcParams["axes.spines.right"] = False
@@ -66,20 +80,43 @@ def plot_golf_shots(
         ax2 = None
 
     # --------------------------------------------------
-    # 1段目 (ax1): 飛距離・高さ・球速
+    # 1段目 (ax1) & 2段目 (ax2): プロット描画
     # --------------------------------------------------
-    scatter1 = ax1.scatter(
-        df["No."],
-        df["キャリー (yds)"],
-        c=df["ボールスピード (m/s)"],
-        s=df["最高到達点 (yds)"] * height_scale,
-        cmap="Blues",
-        alpha=0.8,
-        edgecolors="navy",
-        linewidths=0.8,
-        vmin=vmin,
-        vmax=vmax,
-    )
+    scatter1 = None
+    for club in df["Club-type"].unique():
+        sub = df[df["Club-type"] == club]
+        m, _ = get_marker_and_label(club)
+
+        # 1段目 (ax1): 飛距離・高さ・球速
+        scatter1 = ax1.scatter(
+            sub["No."],
+            sub["キャリー (yds)"],
+            c=sub["ボールスピード (m/s)"],
+            s=sub["最高到達点 (yds)"] * height_scale,
+            cmap="Blues",
+            alpha=0.8,
+            edgecolors="navy",
+            marker=m,
+            linewidths=0.8,
+            vmin=vmin,
+            vmax=vmax,
+        )
+
+        # 2段目 (ax2): 左右打出角・打出角 (二段組時のみ)
+        if is_two_panel and ax2 is not None:
+            ax2.scatter(
+                sub["No."],
+                sub["左右打出角_y"],
+                c=sub["ボールスピード (m/s)"],
+                s=sub["打出角_num"] * launch_scale,
+                cmap="Blues",
+                alpha=0.8,
+                edgecolors="navy",
+                marker=m,
+                linewidths=0.8,
+                vmin=vmin,
+                vmax=vmax,
+            )
 
     # 最大キャリー値のテキスト追加
     if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].empty:
@@ -87,7 +124,6 @@ def plot_golf_shots(
         max_carry = df.loc[max_idx, "キャリー (yds)"]
         max_no = df.loc[max_idx, "No."]
 
-        # 散布図の円の少し右側（x + 0.5）に数値を表示
         ax1.text(
             max_no,
             max_carry + 10,
@@ -105,7 +141,7 @@ def plot_golf_shots(
     ax1.set_ylim(carry_ylim[0], carry_ylim[1])
     ax1.tick_params(labelbottom=True)
 
-    # 1段目の凡例（Peak Height）
+    # 1段目の凡例1（Peak Height）
     legend_handles1 = [
         plt.scatter(
             [],
@@ -118,34 +154,59 @@ def plot_golf_shots(
         )
         for h in peak_height_samples
     ]
-    ax1.legend(
+    leg1 = ax1.legend(
         handles=legend_handles1,
         title="Peak Height",
         loc="center left",
-        bbox_to_anchor=(1.22, 0.5),
+        bbox_to_anchor=(1.22, 0.35),
         frameon=False,
         labelspacing=0.8,
         borderpad=0.8,
         borderaxespad=0.0,
     )
+    ax1.add_artist(leg1)
+
+    # 1段目の凡例2（Club-type）
+    unique_clubs = df["Club-type"].unique()
+    ordered_clubs = []
+    for std_c in ["9i", "7i", "driver", "1w"]:
+        for c in unique_clubs:
+            if c.lower() == std_c and c not in ordered_clubs:
+                ordered_clubs.append(c)
+    for c in unique_clubs:
+        if c not in ordered_clubs:
+            ordered_clubs.append(c)
+
+    club_legend_handles = []
+    for club in ordered_clubs:
+        m, label = get_marker_and_label(club)
+        h = plt.scatter(
+            [],
+            [],
+            c="none",
+            s=80,
+            edgecolors="navy",
+            marker=m,
+            linewidths=0.8,
+            label=label,
+        )
+        club_legend_handles.append(h)
+
+    ax1.legend(
+        handles=club_legend_handles,
+        title="Club",
+        loc="center left",
+        bbox_to_anchor=(1.22, 0.85),
+        frameon=False,
+        labelspacing=0.6,
+        borderpad=0.6,
+        borderaxespad=0.0,
+    )
 
     # --------------------------------------------------
-    # 2段目 (ax2): 左右打出角・打出角 (二段組時のみ)
+    # 2段目 (ax2) 装飾・凡例
     # --------------------------------------------------
     if is_two_panel and ax2 is not None:
-        scatter2 = ax2.scatter(
-            df["No."],
-            df["左右打出角_y"],
-            c=df["ボールスピード (m/s)"],
-            s=df["打出角_num"] * launch_scale,
-            cmap="Blues",
-            alpha=0.8,
-            edgecolors="navy",
-            linewidths=0.8,
-            vmin=vmin,
-            vmax=vmax,
-        )
-
         ax2.axhline(0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
         ax2.set_xlabel("Shot #", labelpad=12, fontsize=14)
         ax2.set_ylabel("Horiz. Launch Angle (deg)", labelpad=12, fontsize=12)
