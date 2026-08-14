@@ -39,7 +39,6 @@ def load_and_aggregate_trackman_data(root_dir="."):
                 date_str = match.group(1)
                 matched_dirs.append((date_str, path))
 
-    # 日付順にソート
     matched_dirs.sort(key=lambda x: x[0])
 
     dfs = []
@@ -50,7 +49,6 @@ def load_and_aggregate_trackman_data(root_dir="."):
                 df = pd.read_csv(csv_file)
                 df["date"] = date_str
 
-                # セッション内のショット番号
                 if "No." not in df.columns or df["No."].isnull().any():
                     df["session_shot_no"] = range(1, len(df) + 1)
                 else:
@@ -65,11 +63,8 @@ def load_and_aggregate_trackman_data(root_dir="."):
         return pd.DataFrame()
 
     full_df = pd.concat(dfs, ignore_index=True)
-
-    # 全体を通した連続X軸インデックス
     full_df["global_shot_no"] = range(1, len(full_df) + 1)
 
-    # 数値列の処理
     if "左右打出角 (度)" in full_df.columns:
         full_df["左右打出角_y"] = full_df["左右打出角 (度)"].apply(
             parse_left_right_y
@@ -94,8 +89,16 @@ def load_and_aggregate_trackman_data(root_dir="."):
     return full_df
 
 
-def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
-    """Plotlyによる2段組インタラクティブ散布図"""
+def plot_trackman_plotly(
+    df,
+    height_scale=1.0,
+    launch_scale=0.6,
+    min_peak_height=3,  # 最高到達点の下限値 (yds)
+    min_launch_angle=5,  # 打出角の下限値 (deg)
+    peak_height_samples=[10, 20, 30],
+    launch_angle_samples=[10, 20, 30, 40],
+):
+    """Plotlyによる2段組インタラクティブ散布図 (最小バブルサイズ下限設定付き)"""
     if df.empty:
         print("DataFrame is empty.")
         return None
@@ -111,7 +114,7 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
         ),
     )
 
-    # ホバーツールチップ用文字列の作成
+    # ツールチップ用テキスト
     hover_top = [
         f"<b>Date:</b> {row['date']}<br>"
         f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
@@ -130,6 +133,14 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
         for _, row in df.iterrows()
     ]
 
+    # --- 最小サイズの適用 (clip処理) ---
+    peak_height_sizes = (
+        df["最高到達点_num"].clip(lower=min_peak_height) * height_scale
+    )
+    launch_angle_sizes = (
+        df["打出角_num"].clip(lower=min_launch_angle) * launch_scale
+    )
+
     # --- 1段目 (Carry) ---
     scatter1 = go.Scatter(
         x=df["global_shot_no"],
@@ -137,15 +148,16 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
         mode="markers",
         hoverinfo="text",
         hovertext=hover_top,
+        showlegend=False,
         marker=dict(
-            size=df["最高到達点_num"] * height_scale,
+            size=peak_height_sizes,
             color=df["ボールスピード (m/s)"],
             colorscale="Blues",
             cmin=0,
             cmax=50,
             showscale=True,
             colorbar=dict(
-                title="Ball Speed (m/s)", x=1.02, len=0.9, y=0.5, yanchor="middle"
+                title="Ball Speed (m/s)", x=1.02, len=0.85, y=0.5, yanchor="middle"
             ),
             line=dict(width=1, color="navy"),
             opacity=0.8,
@@ -154,7 +166,7 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
     )
     fig.add_trace(scatter1, row=1, col=1)
 
-    # 全体での最大キャリー注釈を追加
+    # 最大キャリー値注釈
     if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].empty:
         max_idx = df["キャリー (yds)"].idxmax()
         max_carry = df.loc[max_idx, "キャリー (yds)"]
@@ -183,13 +195,14 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
         mode="markers",
         hoverinfo="text",
         hovertext=hover_bottom,
+        showlegend=False,
         marker=dict(
-            size=df["打出角_num"] * launch_scale,
+            size=launch_angle_sizes,
             color=df["ボールスピード (m/s)"],
             colorscale="Blues",
             cmin=0,
             cmax=50,
-            showscale=False,  # カラーバーは1段目のもので共有
+            showscale=False,
             line=dict(width=1, color="navy"),
             opacity=0.8,
         ),
@@ -197,12 +210,34 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
     )
     fig.add_trace(scatter2, row=2, col=1)
 
-    # 左右中心線 (0度)
+    # 中心線 (0度)
     fig.add_hline(
         y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1
     )
 
-    # --- 日付ごとの区切り線 ＆ 日付テキスト（注釈） ---
+    # --- フローティング L / R テキスト ---
+    fig.add_annotation(
+        x=0.01,
+        y=0.95,
+        xref="x domain",
+        yref="y2 domain",
+        text="<b>L</b>",
+        showarrow=False,
+        font=dict(size=22, color="navy"),
+        align="left",
+    )
+    fig.add_annotation(
+        x=0.01,
+        y=0.05,
+        xref="x domain",
+        yref="y2 domain",
+        text="<b>R</b>",
+        showarrow=False,
+        font=dict(size=22, color="navy"),
+        align="left",
+    )
+
+    # --- 日付区切り線 ＆ 日付テキスト ---
     unique_dates = df["date"].unique()
     for i, date_str in enumerate(unique_dates):
         sub = df[df["date"] == date_str]
@@ -210,7 +245,6 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
         end_x = sub["global_shot_no"].max()
         center_x = (start_x + end_x) / 2
 
-        # セッションの境界に縦の破線を描画
         if i > 0:
             sep_x = start_x - 0.5
             fig.add_vline(
@@ -220,7 +254,6 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
                 line_width=1.5,
             )
 
-        # 各セッションの中央上部に日付テキストを追加
         fig.add_annotation(
             x=center_x,
             y=1.03,
@@ -232,31 +265,125 @@ def plot_trackman_plotly(df, height_scale=0.8, launch_scale=0.8):
             align="center",
         )
 
-    # 軸・レイアウト設定
-    fig.update_yaxes(title_text="Carry (yds)", range=[0, 160], row=1, col=1)
+    # --- 円サイズ凡例 ---
+    for h in peak_height_samples:
+        size_val = max(h, min_peak_height) * height_scale
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(
+                    size=size_val,
+                    color="rgba(0,0,0,0)",
+                    line=dict(width=1.2, color="navy"),
+                ),
+                name=f"{h} yds",
+                legendgroup="peak_height",
+                legendgrouptitle_text="<b>Peak Height</b>",
+                showlegend=True,
+            )
+        )
+
+    for a in launch_angle_samples:
+        size_val = max(a, min_launch_angle) * launch_scale
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(
+                    size=size_val,
+                    color="rgba(0,0,0,0)",
+                    line=dict(width=1.2, color="navy"),
+                ),
+                name=f"{a}°",
+                legendgroup="launch_angle",
+                legendgrouptitle_text="<b>Launch Angle</b>",
+                showlegend=True,
+            )
+        )
+
+    # --- 軸設定（Y軸は固定） ---
     fig.update_yaxes(
-        title_text="Horiz. Launch Angle (deg)", range=[-35, 35], row=2, col=1
+        title_text="Carry (yds)", range=[0, 160], fixedrange=True, row=1, col=1
+    )
+    fig.update_yaxes(
+        title_text="Horiz. Launch Angle (deg)",
+        range=[-35, 35],
+        fixedrange=True,
+        row=2,
+        col=1,
     )
     fig.update_xaxes(
-        title_text="Total Shot # (Hover for date & session info)",
+        title_text="Total Shot # (Horizontal Pan/Zoom Enabled)",
         range=[0, len(df) + 5],
         row=2,
         col=1,
     )
 
+    # --- ボタン設定 ---
+    initial_xlim = [0, len(df) + 5]
+    updatemenus = [
+        dict(
+            type="buttons",
+            direction="right",
+            x=0.01,
+            y=1.12,
+            xanchor="left",
+            yanchor="top",
+            pad=dict(r=10, t=10),
+            buttons=[
+                dict(
+                    label="Mode: Pan (Horizontal)",
+                    method="relayout",
+                    args=["dragmode", "pan"],
+                ),
+                dict(
+                    label="Mode: Zoom (Horizontal)",
+                    method="relayout",
+                    args=["dragmode", "zoom"],
+                ),
+                dict(
+                    label="Reset View",
+                    method="relayout",
+                    args=[
+                        {
+                            "xaxis.range": initial_xlim,
+                            "xaxis2.range": initial_xlim,
+                        }
+                    ],
+                ),
+            ],
+        )
+    ]
+
     fig.update_layout(
-        title=dict(text="TrackMan All Session Analysis", font=dict(size=18)),
-        height=800,
-        showlegend=False,
+        title=dict(
+            text="TrackMan All Session Analysis",
+            font=dict(size=18),
+            y=0.98,
+        ),
+        height=820,
+        dragmode="pan",
+        updatemenus=updatemenus,
         template="plotly_white",
-        margin=dict(t=100, b=60, l=80, r=120),
+        showlegend=True,
+        legend=dict(
+            x=1.14,
+            y=0.5,
+            yanchor="middle",
+            title_font_size=12,
+            bordercolor="rgba(0,0,0,0.1)",
+            borderwidth=1,
+        ),
+        margin=dict(t=120, b=60, l=80, r=220),
     )
 
     return fig
 
 
 if __name__ == "__main__":
-    # データ読み込みとプロット
     df_all = load_and_aggregate_trackman_data(".")
     print(
         f"Loaded {len(df_all)} shots from {df_all['date'].nunique() if not df_all.empty else 0} session(s)."
@@ -264,8 +391,4 @@ if __name__ == "__main__":
 
     if not df_all.empty:
         fig = plot_trackman_plotly(df_all)
-        # ブラウザでインタラクティブ表示
         fig.show()
-
-        # HTMLファイルとして保存したい場合はコメント解除:
-        fig.write_html("golf_range_analysis.html")
