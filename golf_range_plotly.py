@@ -1,6 +1,8 @@
+import json
 import os
 from pathlib import Path
 import re
+import webbrowser
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -106,7 +108,7 @@ def plot_trackman_plotly(
     """Plotlyによる2段組インタラクティブ散布図"""
     if df.empty:
         print("DataFrame is empty.")
-        return None
+        return None, ""
 
     def get_club_symbol_and_label(club_name):
         c = club_name.lower()
@@ -258,9 +260,35 @@ def plot_trackman_plotly(
 
     # --- 各セッションの区切り破線 ＆ 90°回転日付背景テキスト ---
     unique_dates = df["date"].unique()
+    session_ranges = []
+    session_dropdown_buttons = []
+
+    initial_xlim = [0, len(df) + 5]
+
+    session_dropdown_buttons.append(
+        dict(
+            label="All Dates",
+            method="relayout",
+            args=[
+                {"xaxis.range": initial_xlim, "xaxis2.range": initial_xlim}
+            ],
+        )
+    )
+
     for i, date_str in enumerate(unique_dates):
         sub = df[df["date"] == date_str]
-        start_x = sub["global_shot_no"].min()
+        start_x = int(sub["global_shot_no"].min())
+        end_x = int(sub["global_shot_no"].max())
+        s_range = [start_x - 1, end_x + 1]
+        session_ranges.append(s_range)
+
+        session_dropdown_buttons.append(
+            dict(
+                label=f"{date_str} ({len(sub)} shots)",
+                method="relayout",
+                args=[{"xaxis.range": s_range, "xaxis2.range": s_range}],
+            )
+        )
 
         if i > 0:
             sep_x = start_x - 0.5
@@ -424,35 +452,38 @@ def plot_trackman_plotly(
     )
     fig.update_xaxes(
         title_text="Total Shot # (Horizontal Pan/Zoom Enabled)",
-        range=[0, len(df) + 5],
+        range=initial_xlim,
         row=2,
         col=1,
     )
 
-    # --- ボタン設定 ---
-    initial_xlim = [0, len(df) + 5]
+    # --- ボタン ＆ ドロップダウン設定 ---
     updatemenus = [
         dict(
             type="buttons",
             direction="right",
             x=0.01,
-            y=1.12,
+            y=1.13,
             xanchor="left",
             yanchor="top",
-            pad=dict(r=10, t=10),
+            pad=dict(r=4, t=6),
             buttons=[
+                dict(label="<", method="skip"),
+                dict(label=">", method="skip"),
+                dict(label="+", method="skip"),
+                dict(label="-", method="skip"),
                 dict(
-                    label="Mode: Pan (Horizontal)",
+                    label="Pan",
                     method="relayout",
                     args=["dragmode", "pan"],
                 ),
                 dict(
-                    label="Mode: Zoom (Horizontal)",
+                    label="Zoom",
                     method="relayout",
                     args=["dragmode", "zoom"],
                 ),
                 dict(
-                    label="Reset View",
+                    label="Reset",
                     method="relayout",
                     args=[
                         {
@@ -462,7 +493,17 @@ def plot_trackman_plotly(
                     ],
                 ),
             ],
-        )
+        ),
+        dict(
+            type="dropdown",
+            direction="down",
+            x=0.38,
+            y=1.13,
+            xanchor="left",
+            yanchor="top",
+            pad=dict(r=6, t=6),
+            buttons=session_dropdown_buttons,
+        ),
     ]
 
     fig.update_layout(
@@ -477,18 +518,93 @@ def plot_trackman_plotly(
         template="plotly_white",
         showlegend=True,
         legend=dict(
-            x=1.08,  # 1.14から1.08に寄せてカラーバーとの隙間を50%削減
+            x=1.08,
             y=0.5,
             yanchor="middle",
             title_font_size=12,
             bordercolor="rgba(0,0,0,0.1)",
             borderwidth=1,
         ),
-        margin=dict(t=120, b=60, l=80, r=170),  # 余白を220から170にスリム化
+        margin=dict(t=120, b=60, l=80, r=170),
     )
 
-    return fig
+    # 永続的なグローバルイベントリスナー (何回クリックしても動作)
+    post_script = f"""
+    (function() {{
+        var sessionRanges = {json.dumps(session_ranges)};
+        var totalShots = {len(df) + 5};
 
+        document.addEventListener('click', function(e) {{
+            var item = e.target.closest('g.updatemenu-item-group, g.updatemenu-button, .updatemenu-button');
+            if (!item) return;
+            var textEl = item.querySelector('text') || item;
+            var txt = (textEl.textContent || '').trim();
+            if (['<', '>', '+', '-'].indexOf(txt) === -1) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            var gd = document.getElementsByClassName('plotly-graph-div')[0];
+            if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
+
+            var curX = gd._fullLayout.xaxis.range;
+            var curCenter = (curX[0] + curX[1]) / 2;
+            var curSpan = curX[1] - curX[0];
+            var isDefault = (curSpan >= totalShots * 0.7);
+
+            var closestIdx = 0;
+            var minDiff = Infinity;
+            for (var i = 0; i < sessionRanges.length; i++) {{
+                var sCenter = (sessionRanges[i][0] + sessionRanges[i][1]) / 2;
+                var diff = Math.abs(curCenter - sCenter);
+                if (diff < minDiff) {{
+                    minDiff = diff;
+                    closestIdx = i;
+                }}
+            }}
+
+            var target = null;
+            if (txt === '>') {{
+                if (isDefault) {{
+                    target = sessionRanges[0];
+                }} else {{
+                    var nextIdx = Math.min(sessionRanges.length - 1, closestIdx + 1);
+                    target = sessionRanges[nextIdx];
+                }}
+            }} else if (txt === '<') {{
+                if (isDefault) {{
+                    target = sessionRanges[sessionRanges.length - 1];
+                }} else {{
+                    var prevIdx = Math.max(0, closestIdx - 1);
+                    target = sessionRanges[prevIdx];
+                }}
+            }} else if (txt === '+') {{
+                var newSpan = Math.max(4, curSpan / 2);
+                target = [curCenter - newSpan / 2, curCenter + newSpan / 2];
+            }} else if (txt === '-') {{
+                var newSpan = curSpan * 2;
+                if (newSpan >= totalShots) {{
+                    target = [0, totalShots];
+                }} else {{
+                    target = [Math.max(0, curCenter - newSpan / 2), Math.min(totalShots, curCenter + newSpan / 2)];
+                }}
+            }}
+
+            if (target) {{
+                Plotly.relayout(gd, {{
+                    'xaxis.range': target,
+                    'xaxis2.range': target
+                }});
+            }}
+        }}, true);
+    }})();
+    """
+
+    return fig, post_script
+
+
+import platform
+import subprocess
 
 if __name__ == "__main__":
     df_all = load_and_aggregate_trackman_data(".")
@@ -497,6 +613,15 @@ if __name__ == "__main__":
     )
 
     if not df_all.empty:
-        fig = plot_trackman_plotly(df_all)
-        fig.show()
-        fig.write_html("golf_range_analysis.html")
+        fig, post_js = plot_trackman_plotly(df_all)
+        html_file = "golf_range_analysis.html"
+        fig.write_html(html_file, post_script=post_js)
+        print(f"Saved to {html_file}")
+
+        # Open in default browser without AppleScript errors
+        if platform.system() == "Darwin":  # macOS
+            subprocess.run(["open", html_file])
+        elif platform.system() == "Windows":
+            os.startfile(html_file)
+        else:  # Linux
+            subprocess.run(["xdg-open", html_file])
