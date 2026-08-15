@@ -1,7 +1,9 @@
 import json
 import os
 from pathlib import Path
+import platform
 import re
+import subprocess
 import webbrowser
 import numpy as np
 import pandas as pd
@@ -10,19 +12,21 @@ from plotly.subplots import make_subplots
 
 
 def parse_left_right_y(val):
-    """左右打出角の文字列（左=プラス, 右=マイナス）を数値変換"""
+    """左右打出角の文字列（左=プラス, 右=マイナス, 欠損・'-'=NaN）を数値変換"""
     if pd.isna(val):
-        return 0.0
+        return np.nan
     val_str = str(val).strip()
-    if "右" in val_str:
-        return -float(val_str.replace("右", ""))
-    elif "左" in val_str:
-        return float(val_str.replace("左", ""))
-    else:
-        try:
+    if val_str in ["-", "--", "", "nan", "None"]:
+        return np.nan
+    try:
+        if "右" in val_str:
+            return -float(val_str.replace("右", "").strip())
+        elif "左" in val_str:
+            return float(val_str.replace("左", "").strip())
+        else:
             return float(val_str)
-        except ValueError:
-            return 0.0
+    except (ValueError, TypeError):
+        return np.nan
 
 
 def load_and_aggregate_trackman_data(root_dir="."):
@@ -64,6 +68,12 @@ def load_and_aggregate_trackman_data(root_dir="."):
     full_df = pd.concat(dfs, ignore_index=True)
     full_df["global_shot_no"] = range(1, len(full_df) + 1)
 
+    # 数値列の安全な型変換（'-' 等の欠損値を NaN に強制変換）
+    num_cols = ["キャリー (yds)", "ボールスピード (m/s)", "最高到達点 (yds)", "打出角 (度)"]
+    for col in num_cols:
+        if col in full_df.columns:
+            full_df[col] = pd.to_numeric(full_df[col], errors="coerce")
+
     # Club-type の確保
     if "Club-type" not in full_df.columns:
         full_df["Club-type"] = "9i"
@@ -77,19 +87,15 @@ def load_and_aggregate_trackman_data(root_dir="."):
             parse_left_right_y
         )
     else:
-        full_df["左右打出角_y"] = 0.0
+        full_df["左右打出角_y"] = np.nan
 
     if "打出角 (度)" in full_df.columns:
-        full_df["打出角_num"] = pd.to_numeric(
-            full_df["打出角 (度)"], errors="coerce"
-        ).fillna(0.0)
+        full_df["打出角_num"] = full_df["打出角 (度)"].fillna(0.0)
     else:
         full_df["打出角_num"] = 0.0
 
     if "最高到達点 (yds)" in full_df.columns:
-        full_df["最高到達点_num"] = pd.to_numeric(
-            full_df["最高到達点 (yds)"], errors="coerce"
-        ).fillna(0.0)
+        full_df["最高到達点_num"] = full_df["最高到達点 (yds)"].fillna(0.0)
     else:
         full_df["最高到達点_num"] = 0.0
 
@@ -105,7 +111,7 @@ def plot_trackman_plotly(
     peak_height_samples=[3, 10, 20, 30],
     launch_angle_samples=[5, 10, 20, 30, 40],
 ):
-    """Plotlyによる2段組インタラクティブ散布図"""
+    """Plotlyによる2段組インタラクティブ散布図 (欠損値対応版)"""
     if df.empty:
         print("DataFrame is empty.")
         return None, ""
@@ -129,15 +135,22 @@ def plot_trackman_plotly(
         ),
     )
 
-    # ツールチップ用テキスト
+    # ツールチップ用テキスト (NaN を 'N/A' として安全に表示)
+    def fmt_val(val, unit=""):
+        if pd.isna(val):
+            return "N/A"
+        if isinstance(val, (int, float, np.floating, np.integer)):
+            return f"{val:.1f}{unit}"
+        return f"{val}{unit}"
+
     hover_top = {
         idx: (
             f"<b>Date:</b> {row['date']}<br>"
             f"<b>Club:</b> {row['Club-type']}<br>"
             f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
-            f"<b>Carry:</b> {row.get('キャリー (yds)', 'N/A')} yds<br>"
-            f"<b>Ball Speed:</b> {row.get('ボールスピード (m/s)', 'N/A')} m/s<br>"
-            f"<b>Peak Height:</b> {row['最高到達点_num']} yds"
+            f"<b>Carry:</b> {fmt_val(row.get('キャリー (yds)'), ' yds')}<br>"
+            f"<b>Ball Speed:</b> {fmt_val(row.get('ボールスピード (m/s)'), ' m/s')}<br>"
+            f"<b>Peak Height:</b> {fmt_val(row.get('最高到達点 (yds)'), ' yds')}"
         )
         for idx, row in df.iterrows()
     }
@@ -147,9 +160,9 @@ def plot_trackman_plotly(
             f"<b>Date:</b> {row['date']}<br>"
             f"<b>Club:</b> {row['Club-type']}<br>"
             f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
-            f"<b>Horiz. Launch:</b> {row['左右打出角_y']:.1f}°<br>"
-            f"<b>Ball Speed:</b> {row.get('ボールスピード (m/s)', 'N/A')} m/s<br>"
-            f"<b>Launch Angle:</b> {row['打出角_num']:.1f}°"
+            f"<b>Horiz. Launch:</b> {fmt_val(row.get('左右打出角_y'), '°')}<br>"
+            f"<b>Ball Speed:</b> {fmt_val(row.get('ボールスピード (m/s)'), ' m/s')}<br>"
+            f"<b>Launch Angle:</b> {fmt_val(row.get('打出角 (度)'), '°')}"
         )
         for idx, row in df.iterrows()
     }
@@ -232,8 +245,8 @@ def plot_trackman_plotly(
         )
         fig.add_trace(scatter2, row=2, col=1)
 
-    # 最大キャリー値注釈
-    if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].empty:
+    # 最大キャリー値注釈 (欠損値を除外して検索)
+    if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].dropna().empty:
         max_idx = df["キャリー (yds)"].idxmax()
         max_carry = df.loc[max_idx, "キャリー (yds)"]
         max_x = df.loc[max_idx, "global_shot_no"]
@@ -528,7 +541,7 @@ def plot_trackman_plotly(
         margin=dict(t=120, b=60, l=80, r=170),
     )
 
-    # 永続的なグローバルイベントリスナー (何回クリックしても動作)
+    # 永続的なグローバルイベントリスナー
     post_script = f"""
     (function() {{
         var sessionRanges = {json.dumps(session_ranges)};
@@ -603,9 +616,6 @@ def plot_trackman_plotly(
     return fig, post_script
 
 
-import platform
-import subprocess
-
 if __name__ == "__main__":
     df_all = load_and_aggregate_trackman_data(".")
     print(
@@ -618,7 +628,6 @@ if __name__ == "__main__":
         fig.write_html(html_file, post_script=post_js)
         print(f"Saved to {html_file}")
 
-        # Open in default browser without AppleScript errors
         if platform.system() == "Darwin":  # macOS
             subprocess.run(["open", html_file])
         elif platform.system() == "Windows":
