@@ -23,6 +23,18 @@ def plot_golf_shots(
     else:
         df = df_or_path.copy()
 
+    # 数値列の '-' や欠損値を安全に NaN へ一括変換
+    numeric_cols = [
+        "No.",
+        "キャリー (yds)",
+        "ボールスピード (m/s)",
+        "最高到達点 (yds)",
+        "打出角 (度)",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     # No.列の確保 (1から連番)
     if "No." not in df.columns or df["No."].isnull().any():
         df["No."] = range(1, len(df) + 1)
@@ -31,22 +43,27 @@ def plot_golf_shots(
     if xlim is None:
         xlim = (0, len(df) + 5)
 
-    # 左右打出角の数値変換（左=プラス, 右=マイナス）
+    # 左右打出角の数値変換（左=プラス, 右=マイナス, '-'=NaN）
     def parse_left_right_y(val):
         if pd.isna(val):
-            return 0.0
+            return np.nan
         val_str = str(val).strip()
-        if "右" in val_str:
-            return -float(val_str.replace("右", ""))
-        elif "左" in val_str:
-            return float(val_str.replace("左", ""))
-        else:
-            return float(val_str)
+        if val_str in ["-", ""]:
+            return np.nan
+        try:
+            if "右" in val_str:
+                return -float(val_str.replace("右", ""))
+            elif "左" in val_str:
+                return float(val_str.replace("左", ""))
+            else:
+                return float(val_str)
+        except ValueError:
+            return np.nan
 
     if "左右打出角 (度)" in df.columns:
         df["左右打出角_y"] = df["左右打出角 (度)"].apply(parse_left_right_y)
     if "打出角 (度)" in df.columns:
-        df["打出角_num"] = pd.to_numeric(df["打出角 (度)"], errors="coerce")
+        df["打出角_num"] = df["打出角 (度)"]
 
     # Club-type 列の確保（未指定時はデフォルト 9i）
     if "Club-type" not in df.columns:
@@ -119,7 +136,7 @@ def plot_golf_shots(
             )
 
     # 最大キャリー値のテキスト追加
-    if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].empty:
+    if "キャリー (yds)" in df.columns and df["キャリー (yds)"].notnull().any():
         max_idx = df["キャリー (yds)"].idxmax()
         max_carry = df.loc[max_idx, "キャリー (yds)"]
         max_no = df.loc[max_idx, "No."]
