@@ -266,9 +266,9 @@ def plot_trackman_plotly(
             col=1,
         )
 
-    # 中心線 (0度)
+    # 中心線 (0度) — highlight in red and render above traces
     fig.add_hline(
-        y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1
+        y=0, line_dash="solid", line_color="red", line_width=1, row=2, col=1, layer="above"
     )
 
     # --- 各セッションの区切り破線 ＆ 90°回転日付背景テキスト ---
