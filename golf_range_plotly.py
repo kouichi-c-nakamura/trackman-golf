@@ -624,7 +624,7 @@ if __name__ == "__main__":
 
     if not df_all.empty:
         fig, post_js = plot_trackman_plotly(df_all)
-        html_file = "golf_range_analysis.html"
+        html_file = "index.html"
         fig.write_html(html_file, post_script=post_js)
         print(f"Saved to {html_file}")
 
