@@ -111,7 +111,7 @@ def plot_trackman_plotly(
     peak_height_samples=[3, 10, 20, 30],
     launch_angle_samples=[5, 10, 20, 30, 40],
 ):
-    """Plotlyによる2段組インタラクティブ散布図 (欠損値対応版)"""
+    """Plotlyによる2段組インタラクティブ散布図"""
     if df.empty:
         print("DataFrame is empty.")
         return None, ""
@@ -135,7 +135,7 @@ def plot_trackman_plotly(
         ),
     )
 
-    # ツールチップ用テキスト (NaN を 'N/A' として安全に表示)
+    # ツールチップ用テキスト
     def fmt_val(val, unit=""):
         if pd.isna(val):
             return "N/A"
@@ -167,7 +167,7 @@ def plot_trackman_plotly(
         for idx, row in df.iterrows()
     }
 
-    # 最小サイズの適用 (clip処理)
+    # 最小サイズの適用
     df["peak_height_sizes"] = (
         df["最高到達点_num"].clip(lower=min_peak_height) * height_scale
     )
@@ -175,7 +175,7 @@ def plot_trackman_plotly(
         df["打出角_num"].clip(lower=min_launch_angle) * launch_scale
     )
 
-    # --- 散布図プロット (ax1 & ax2) クラブごとに描画 ---
+    # --- 散布図プロット (ax1 & ax2) ---
     unique_clubs = df["Club-type"].unique()
     colorbar_shown = False
 
@@ -245,7 +245,7 @@ def plot_trackman_plotly(
         )
         fig.add_trace(scatter2, row=2, col=1)
 
-    # 最大キャリー値注釈 (欠損値を除外して検索)
+    # 最大キャリー値注釈
     if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].dropna().empty:
         max_idx = df["キャリー (yds)"].idxmax()
         max_carry = df.loc[max_idx, "キャリー (yds)"]
@@ -266,7 +266,7 @@ def plot_trackman_plotly(
             col=1,
         )
 
-    # 中心線 (0度) — 赤実線で最前面に表示
+    # 中心線 (0度) — 赤実線
     fig.add_hline(
         y=0,
         line_dash="solid",
@@ -277,10 +277,12 @@ def plot_trackman_plotly(
         layer="above",
     )
 
-    # --- 各セッションの区切り破線 ＆ 日付ホバートレース（クラブ別統計サマリー） ---
+    # --- 各セッションの区切り破線 ＆ 90°回転日付背景テキスト ＆ 統計辞書作成 ---
     unique_dates = df["date"].unique()
     session_ranges = []
     session_dropdown_buttons = []
+    session_meta = []
+    daily_stats_dict = {}
 
     initial_xlim = [0, len(df) + 5]
 
@@ -300,6 +302,9 @@ def plot_trackman_plotly(
         end_x = int(sub["global_shot_no"].max())
         s_range = [start_x - 1, end_x + 1]
         session_ranges.append(s_range)
+
+        text_x = start_x - 0.2
+        session_meta.append({"date": date_str, "x": text_x})
 
         session_dropdown_buttons.append(
             dict(
@@ -374,23 +379,25 @@ def plot_trackman_plotly(
                 horiz_str = "N/A"
 
             block = (
+                f"<div style='margin-bottom:6px;'>"
                 f"<b>【 {c_name} 】</b> ({n_c} shots)<br>"
                 f"  • <b>Carry:</b> {carry_str}<br>"
                 f"  • <b>Speed:</b> {speed_str}<br>"
                 f"  • <b>Launch:</b> avg {launch_str} | <b>Horiz:</b> {horiz_str}"
+                f"</div>"
             )
             club_stats_blocks.append(block)
 
-        stats_tooltip = (
-            f"📅 <b>Session: {date_str}</b> (Total {len(sub)} shots)<br>"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br>"
-            + "<br><br>".join(club_stats_blocks)
+        stats_html = (
+            f"<div style='font-family:sans-serif; font-size:13px; line-height:1.4; color:#222;'>"
+            f"<div style='font-size:14px; font-weight:bold; border-bottom:1px solid #ccc; padding-bottom:4px; margin-bottom:6px;'>"
+            f"📅 Session: {date_str} (Total {len(sub)} shots)</div>"
+            + "".join(club_stats_blocks)
+            + "</div>"
         )
+        daily_stats_dict[date_str] = stats_html
 
-        text_x = start_x - 0.2
-
-        # --- 1. 元通りの 90° 回転背景テキスト (Annotation) ---
-        # 1段目 (Carry) 背景日付
+        # 1段目 (Carry) 90° 回転背景日付
         fig.add_annotation(
             x=text_x,
             y=0.95,
@@ -403,7 +410,7 @@ def plot_trackman_plotly(
             xanchor="left",
             yanchor="top",
         )
-        # 2段目 (Angle) 背景日付
+        # 2段目 (Angle) 90° 回転背景日付
         fig.add_annotation(
             x=text_x,
             y=0.95,
@@ -416,36 +423,6 @@ def plot_trackman_plotly(
             xanchor="left",
             yanchor="top",
         )
-
-    # --- 2. ホバー用の不可視トレース（統計ツールチップ用） ---
-    # 1段目ホバー
-    fig.add_trace(
-        go.Scatter(
-            x=[text_x],
-            y=[140],
-            mode="markers",
-            marker=dict(size=25, color="rgba(0,0,0,0)"),  # 透明な当たり判定
-            hoverinfo="text",
-            hovertext=[stats_tooltip],
-            showlegend=False,
-        ),
-        row=1,
-        col=1,
-    )
-    # 2段目ホバー
-    fig.add_trace(
-        go.Scatter(
-            x=[text_x],
-            y=[25],
-            mode="markers",
-            marker=dict(size=25, color="rgba(0,0,0,0)"),  # 透明な当たり判定
-            hoverinfo="text",
-            hovertext=[stats_tooltip],
-            showlegend=False,
-        ),
-        row=2,
-        col=1,
-    )
 
     # --- フローティング L / R テキスト ---
     fig.add_annotation(
@@ -469,7 +446,7 @@ def plot_trackman_plotly(
         align="left",
     )
 
-    # --- 凡例1: Club-type 凡例 ---
+    # --- 凡例1: Club-type ---
     ordered_clubs = []
     for std_c in ["9i", "7i", "driver", "1w"]:
         for c in unique_clubs:
@@ -499,7 +476,7 @@ def plot_trackman_plotly(
             )
         )
 
-    # --- 凡例2: Peak Height 凡例 ---
+    # --- 凡例2: Peak Height ---
     for h in peak_height_samples:
         size_val = max(h, min_peak_height) * height_scale
         label_text = (
@@ -523,7 +500,7 @@ def plot_trackman_plotly(
             )
         )
 
-    # --- 凡例3: Launch Angle 凡例 ---
+    # --- 凡例3: Launch Angle ---
     for a in launch_angle_samples:
         size_val = max(a, min_launch_angle) * launch_scale
         label_text = (
@@ -636,12 +613,84 @@ def plot_trackman_plotly(
         margin=dict(t=120, b=60, l=80, r=170),
     )
 
-    # 永続的なグローバルイベントリスナー
+    # 永続的なグローバルイベントリスナー ＆ 幾何座標ベースの日付ホバーポップアップ
     post_script = f"""
     (function() {{
         var sessionRanges = {json.dumps(session_ranges)};
+        var sessionMeta = {json.dumps(session_meta)};
+        var dailyStats = {json.dumps(daily_stats_dict)};
         var totalShots = {len(df) + 5};
 
+        // 1. ポップアップ要素の生成
+        var tooltip = document.createElement('div');
+        tooltip.id = 'tm-date-tooltip';
+        tooltip.style.position = 'fixed';
+        tooltip.style.display = 'none';
+        tooltip.style.zIndex = '99999';
+        tooltip.style.backgroundColor = 'rgba(255, 255, 255, 0.96)';
+        tooltip.style.border = '1px solid #78909c';
+        tooltip.style.borderRadius = '6px';
+        tooltip.style.padding = '10px 14px';
+        tooltip.style.boxShadow = '0 4px 14px rgba(0,0,0,0.18)';
+        tooltip.style.pointerEvents = 'none';
+        tooltip.style.maxWidth = '360px';
+        document.body.appendChild(tooltip);
+
+        // 2. グラフ上のマウス移動を座標計算して日付エリアを判定
+        document.addEventListener('mousemove', function(e) {{
+            var gd = document.getElementsByClassName('plotly-graph-div')[0];
+            if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
+
+            var rect = gd.getBoundingClientRect();
+            var fl = gd._fullLayout;
+            var mousePixelX = e.clientX - rect.left - fl.xaxis._offset;
+            var mousePixelY = e.clientY - rect.top;
+
+            // X軸プロット範囲外
+            if (mousePixelX < 0 || mousePixelX > fl.xaxis._length) {{
+                tooltip.style.display = 'none';
+                return;
+            }}
+
+            // 上段プロット or 下段プロットの領域内か判定
+            var inRow1 = (mousePixelY >= fl.yaxis._offset && mousePixelY <= fl.yaxis._offset + fl.yaxis._length);
+            var inRow2 = (mousePixelY >= fl.yaxis2._offset && mousePixelY <= fl.yaxis2._offset + fl.yaxis2._length);
+
+            if (!inRow1 && !inRow2) {{
+                tooltip.style.display = 'none';
+                return;
+            }}
+
+            // ピクセルX座標をShot番号(Data X)に変換
+            var xRange = fl.xaxis.range;
+            var dataX = xRange[0] + (mousePixelX / fl.xaxis._length) * (xRange[1] - xRange[0]);
+
+            // 画面上で文字幅(約20px)に相当するData X許容幅を算出
+            var thresholdDataX = Math.max(0.5, (20 / fl.xaxis._length) * (xRange[1] - xRange[0]));
+
+            var matchedDate = null;
+            for (var i = 0; i < sessionMeta.length; i++) {{
+                if (Math.abs(dataX - sessionMeta[i].x) <= thresholdDataX) {{
+                    matchedDate = sessionMeta[i].date;
+                    break;
+                }}
+            }}
+
+            if (matchedDate && dailyStats[matchedDate]) {{
+                tooltip.innerHTML = dailyStats[matchedDate];
+                tooltip.style.display = 'block';
+                var posX = e.clientX + 15;
+                var posY = e.clientY + 15;
+                if (posX + 360 > window.innerWidth) posX = e.clientX - 375;
+                if (posY + 260 > window.innerHeight) posY = e.clientY - 270;
+                tooltip.style.left = posX + 'px';
+                tooltip.style.top = posY + 'px';
+            }} else {{
+                tooltip.style.display = 'none';
+            }}
+        }});
+
+        // 3. ナビゲーションボタン操作
         document.addEventListener('click', function(e) {{
             var item = e.target.closest('g.updatemenu-item-group, g.updatemenu-button, .updatemenu-button');
             if (!item) return;
