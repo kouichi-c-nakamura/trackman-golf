@@ -266,12 +266,18 @@ def plot_trackman_plotly(
             col=1,
         )
 
-    # 中心線 (0度) — highlight in red and render above traces
+    # 中心線 (0度) — 赤実線で最前面に表示
     fig.add_hline(
-        y=0, line_dash="solid", line_color="red", line_width=1, row=2, col=1, layer="above"
+        y=0,
+        line_dash="solid",
+        line_color="red",
+        line_width=1,
+        row=2,
+        col=1,
+        layer="above",
     )
 
-    # --- 各セッションの区切り破線 ＆ 90°回転日付背景テキスト ---
+    # --- 各セッションの区切り破線 ＆ 日付ホバートレース（クラブ別統計サマリー） ---
     unique_dates = df["date"].unique()
     session_ranges = []
     session_dropdown_buttons = []
@@ -322,9 +328,69 @@ def plot_trackman_plotly(
                 col=1,
             )
 
+        # --- クラブごとの詳細統計サマリーの生成 ---
+        club_stats_blocks = []
+        for c_name in sub["Club-type"].unique():
+            c_sub = sub[sub["Club-type"] == c_name]
+            n_c = len(c_sub)
+
+            # キャリー
+            c_carry = c_sub["キャリー (yds)"].dropna()
+            c_max_carry = c_carry.max()
+            c_avg_carry = c_carry.mean()
+            c_sd_carry = c_carry.std()
+
+            carry_str = "N/A"
+            if not c_carry.empty:
+                sd_part = f" ± {c_sd_carry:.1f}" if pd.notna(c_sd_carry) else ""
+                carry_str = f"avg {c_avg_carry:.1f}{sd_part} yds (max {c_max_carry:.1f})"
+
+            # ボールスピード
+            c_speed = c_sub["ボールスピード (m/s)"].dropna()
+            c_max_speed = c_speed.max()
+            c_avg_speed = c_speed.mean()
+            c_sd_speed = c_speed.std()
+
+            speed_str = "N/A"
+            if not c_speed.empty:
+                sd_part = f" ± {c_sd_speed:.1f}" if pd.notna(c_sd_speed) else ""
+                speed_str = f"avg {c_avg_speed:.1f}{sd_part} m/s (max {c_max_speed:.1f})"
+
+            # 打出角
+            c_launch = c_sub["打出角 (度)"].dropna()
+            launch_str = f"{c_launch.mean():.1f}°" if not c_launch.empty else "N/A"
+
+            # 左右打出角
+            c_horiz = c_sub["左右打出角_y"].dropna()
+            if not c_horiz.empty:
+                h_mean = c_horiz.mean()
+                if h_mean > 0.3:
+                    horiz_str = f"L {abs(h_mean):.1f}°"
+                elif h_mean < -0.3:
+                    horiz_str = f"R {abs(h_mean):.1f}°"
+                else:
+                    horiz_str = f"Straight ({h_mean:+.1f}°)"
+            else:
+                horiz_str = "N/A"
+
+            block = (
+                f"<b>【 {c_name} 】</b> ({n_c} shots)<br>"
+                f"  • <b>Carry:</b> {carry_str}<br>"
+                f"  • <b>Speed:</b> {speed_str}<br>"
+                f"  • <b>Launch:</b> avg {launch_str} | <b>Horiz:</b> {horiz_str}"
+            )
+            club_stats_blocks.append(block)
+
+        stats_tooltip = (
+            f"📅 <b>Session: {date_str}</b> (Total {len(sub)} shots)<br>"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br>"
+            + "<br><br>".join(club_stats_blocks)
+        )
+
         text_x = start_x - 0.2
 
-        # 1段目 (Carry) 背景日付テキスト
+        # --- 1. 元通りの 90° 回転背景テキスト (Annotation) ---
+        # 1段目 (Carry) 背景日付
         fig.add_annotation(
             x=text_x,
             y=0.95,
@@ -337,8 +403,7 @@ def plot_trackman_plotly(
             xanchor="left",
             yanchor="top",
         )
-
-        # 2段目 (Angle) 背景日付テキスト
+        # 2段目 (Angle) 背景日付
         fig.add_annotation(
             x=text_x,
             y=0.95,
@@ -351,6 +416,36 @@ def plot_trackman_plotly(
             xanchor="left",
             yanchor="top",
         )
+
+    # --- 2. ホバー用の不可視トレース（統計ツールチップ用） ---
+    # 1段目ホバー
+    fig.add_trace(
+        go.Scatter(
+            x=[text_x],
+            y=[140],
+            mode="markers",
+            marker=dict(size=25, color="rgba(0,0,0,0)"),  # 透明な当たり判定
+            hoverinfo="text",
+            hovertext=[stats_tooltip],
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    # 2段目ホバー
+    fig.add_trace(
+        go.Scatter(
+            x=[text_x],
+            y=[25],
+            mode="markers",
+            marker=dict(size=25, color="rgba(0,0,0,0)"),  # 透明な当たり判定
+            hoverinfo="text",
+            hovertext=[stats_tooltip],
+            showlegend=False,
+        ),
+        row=2,
+        col=1,
+    )
 
     # --- フローティング L / R テキスト ---
     fig.add_annotation(
