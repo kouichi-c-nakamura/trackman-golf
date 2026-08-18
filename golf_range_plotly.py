@@ -178,6 +178,9 @@ def plot_trackman_plotly(
     # --- 散布図プロット (ax1 & ax2) ---
     unique_clubs = df["Club-type"].unique()
     colorbar_shown = False
+    
+    # Choose your preferred scale: "Viridis", "Plasma", "Inferno", or "Turbo"
+    COLORMAP = "Turbo"
 
     for club in unique_clubs:
         sub = df[df["Club-type"] == club]
@@ -196,7 +199,7 @@ def plot_trackman_plotly(
                 symbol=sym,
                 size=sub["peak_height_sizes"],
                 color=sub["ボールスピード (m/s)"],
-                colorscale="Blues",
+                colorscale=COLORMAP,
                 cmin=0,
                 cmax=50,
                 showscale=show_cbar,
@@ -214,8 +217,8 @@ def plot_trackman_plotly(
                 )
                 if show_cbar
                 else None,
-                line=dict(width=1, color="navy"),
-                opacity=0.8,
+                line=dict(width=0.8, color="#222222"),  # 暗めの細枠でシンボルの輪郭を際立たせる
+                opacity=0.85,
             ),
             name="Carry",
         )
@@ -234,12 +237,12 @@ def plot_trackman_plotly(
                 symbol=sym,
                 size=sub["launch_angle_sizes"],
                 color=sub["ボールスピード (m/s)"],
-                colorscale="Blues",
+                colorscale=COLORMAP,
                 cmin=0,
                 cmax=50,
                 showscale=False,
-                line=dict(width=1, color="navy"),
-                opacity=0.8,
+                line=dict(width=0.8, color="#222222"),
+                opacity=0.85,
             ),
             name="Horiz Launch Angle",
         )
