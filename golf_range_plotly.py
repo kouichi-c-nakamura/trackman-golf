@@ -617,12 +617,52 @@ def plot_trackman_plotly(
     )
 
     # 永続的なグローバルイベントリスナー ＆ 幾何座標ベースの日付ホバーポップアップ
+    # 永続的なグローバルイベントリスナー ＆ 幾何座標ベースの日付ホバーポップアップ ＆ ドロップダウン同期
     post_script = f"""
     (function() {{
         var sessionRanges = {json.dumps(session_ranges)};
         var sessionMeta = {json.dumps(session_meta)};
         var dailyStats = {json.dumps(daily_stats_dict)};
         var totalShots = {len(df) + 5};
+
+        // --- ドロップダウンメニューのラベル同期関数 ---
+        function updateDropdownLabel(gd, targetRange) {{
+            if (!gd) return;
+            var curX0 = targetRange ? targetRange[0] : gd._fullLayout.xaxis.range[0];
+            var curX1 = targetRange ? targetRange[1] : gd._fullLayout.xaxis.range[1];
+            var curSpan = curX1 - curX0;
+            var curCenter = (curX0 + curX1) / 2;
+
+            var activeLabel = "All Dates";
+            if (curSpan < totalShots * 0.7) {{
+                var closestIdx = 0;
+                var minDiff = Infinity;
+                for (var i = 0; i < sessionRanges.length; i++) {{
+                    var sCenter = (sessionRanges[i][0] + sessionRanges[i][1]) / 2;
+                    var diff = Math.abs(curCenter - sCenter);
+                    if (diff < minDiff) {{
+                        minDiff = diff;
+                        closestIdx = i;
+                    }}
+                }}
+                if (sessionMeta[closestIdx]) {{
+                    var matched = dailyStats[sessionMeta[closestIdx].date];
+                    // セッション名 (shots数含む形式) を復元
+                    var shotCountMatch = matched ? matched.match(/Total (\\d+) shots/) : null;
+                    var countStr = shotCountMatch ? " (" + shotCountMatch[1] + " shots)" : "";
+                    activeLabel = sessionMeta[closestIdx].date + countStr;
+                }}
+            }}
+
+            // ドロップダウンのヘッダーテキスト要素を更新
+            var menus = gd.querySelectorAll('.updatemenu-container g.updatemenu-header-group text, .updatemenu-container g.updatemenu-button text');
+            menus.forEach(function(t) {{
+                // ドロップダウンヘッダー (▼アイコン付きまたは日付形式) を特定して更新
+                if (t.textContent.indexOf('shots') !== -1 || t.textContent.indexOf('All Dates') !== -1 || t.textContent.indexOf('202') !== -1) {{
+                    t.textContent = activeLabel;
+                }}
+            }});
+        }}
 
         // 1. ポップアップ要素の生成
         var tooltip = document.createElement('div');
@@ -693,7 +733,7 @@ def plot_trackman_plotly(
             }}
         }});
 
-        // 3. ナビゲーションボタン操作
+        // 3. ナビゲーションボタン操作 ＆ ドロップダウン連動
         document.addEventListener('click', function(e) {{
             var item = e.target.closest('g.updatemenu-item-group, g.updatemenu-button, .updatemenu-button');
             if (!item) return;
@@ -754,9 +794,22 @@ def plot_trackman_plotly(
                 Plotly.relayout(gd, {{
                     'xaxis.range': target,
                     'xaxis2.range': target
+                }}).then(function() {{
+                    updateDropdownLabel(gd, target);
                 }});
             }}
         }}, true);
+
+        // 4. 手動ドラッグ(Pan/Zoom)やResetボタン時にもドロップダウンラベルを追従
+        window.addEventListener('load', function() {{
+            var gd = document.getElementsByClassName('plotly-graph-div')[0];
+            if (gd && gd.on) {{
+                gd.on('plotly_relayout', function(eventdata) {{
+                    // ボタンクリック経由でない直接リレイアウト時にも同期
+                    setTimeout(function() {{ updateDropdownLabel(gd); }}, 50);
+                }});
+            }}
+        }});
     }})();
     """
 
