@@ -179,7 +179,6 @@ def plot_trackman_plotly(
     unique_clubs = df["Club-type"].unique()
     colorbar_shown = False
     
-    # Choose your preferred scale: "Viridis", "Plasma", "Inferno", or "Turbo"
     COLORMAP = "Turbo"
 
     for club in unique_clubs:
@@ -217,7 +216,7 @@ def plot_trackman_plotly(
                 )
                 if show_cbar
                 else None,
-                line=dict(width=0.8, color="#222222"),  # 暗めの細枠でシンボルの輪郭を際立たせる
+                line=dict(width=0.8, color="#222222"),
                 opacity=0.85,
             ),
             name="Carry",
@@ -248,26 +247,44 @@ def plot_trackman_plotly(
         )
         fig.add_trace(scatter2, row=2, col=1)
 
-    # 最大キャリー値注釈
+    # 初期最大キャリー値の取得
+    initial_max_carry = 0
+    initial_max_x = 0
     if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].dropna().empty:
         max_idx = df["キャリー (yds)"].idxmax()
-        max_carry = df.loc[max_idx, "キャリー (yds)"]
-        max_x = df.loc[max_idx, "global_shot_no"]
+        initial_max_carry = float(df.loc[max_idx, "キャリー (yds)"])
+        initial_max_x = int(df.loc[max_idx, "global_shot_no"])
 
-        fig.add_annotation(
-            x=max_x,
-            y=max_carry,
-            text=f"<b>Max: {int(round(max_carry))} yds</b>",
-            showarrow=True,
-            arrowhead=2,
-            arrowsize=1,
-            arrowcolor="navy",
-            ax=20,
-            ay=-25,
-            font=dict(color="navy", size=12),
-            row=1,
-            col=1,
-        )
+    # 最大キャリー強調用専用トレース（後からJSで動的に位置とテキストを書き換え）
+    fig.add_trace(
+        go.Scatter(
+            x=[initial_max_x],
+            y=[initial_max_carry],
+            mode="text+markers",
+            text=[f"<b>Max: {int(round(initial_max_carry))} yds</b>"],
+            textposition="top center",
+            textfont=dict(size=13, color="#b71c1c"),
+            marker=dict(
+                symbol="star",
+                size=16,
+                color="red",
+                line=dict(width=1.5, color="black"),
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+            name="MaxCarryHighlight",
+        ),
+        row=1,
+        col=1,
+    )
+    max_trace_idx = len(fig.data) - 1
+
+    # JSでの高速最大値探索用ショットリスト
+    valid_shots = df[["global_shot_no", "キャリー (yds)"]].dropna()
+    shot_carry_list = [
+        {"x": int(r["global_shot_no"]), "carry": float(r["キャリー (yds)"])}
+        for _, r in valid_shots.iterrows()
+    ]
 
     # 中心線 (0度) — 赤実線
     fig.add_hline(
@@ -616,18 +633,19 @@ def plot_trackman_plotly(
         margin=dict(t=120, b=60, l=80, r=170),
     )
 
-    # 永続的なグローバルイベントリスナー ＆ 幾何座標ベースの日付ホバーポップアップ
-    # 永続的なグローバルイベントリスナー ＆ 幾何座標ベースの日付ホバーポップアップ ＆ ドロップダウン同期
+    # 永続的なグローバルイベントリスナー ＆ 幾何座標ベースの日付ホバー ＆ ドロップダウン同期 ＆ 画面内最大キャリー動的追従
     post_script = f"""
     (function() {{
         var sessionRanges = {json.dumps(session_ranges)};
         var sessionMeta = {json.dumps(session_meta)};
         var dailyStats = {json.dumps(daily_stats_dict)};
+        var shotCarryList = {json.dumps(shot_carry_list)};
         var totalShots = {len(df) + 5};
+        var maxTraceIdx = {max_trace_idx};
 
         // --- ドロップダウンメニューのラベル同期関数 ---
         function updateDropdownLabel(gd, targetRange) {{
-            if (!gd) return;
+            if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
             var curX0 = targetRange ? targetRange[0] : gd._fullLayout.xaxis.range[0];
             var curX1 = targetRange ? targetRange[1] : gd._fullLayout.xaxis.range[1];
             var curSpan = curX1 - curX0;
@@ -647,21 +665,54 @@ def plot_trackman_plotly(
                 }}
                 if (sessionMeta[closestIdx]) {{
                     var matched = dailyStats[sessionMeta[closestIdx].date];
-                    // セッション名 (shots数含む形式) を復元
                     var shotCountMatch = matched ? matched.match(/Total (\\d+) shots/) : null;
                     var countStr = shotCountMatch ? " (" + shotCountMatch[1] + " shots)" : "";
                     activeLabel = sessionMeta[closestIdx].date + countStr;
                 }}
             }}
 
-            // ドロップダウンのヘッダーテキスト要素を更新
             var menus = gd.querySelectorAll('.updatemenu-container g.updatemenu-header-group text, .updatemenu-container g.updatemenu-button text');
             menus.forEach(function(t) {{
-                // ドロップダウンヘッダー (▼アイコン付きまたは日付形式) を特定して更新
                 if (t.textContent.indexOf('shots') !== -1 || t.textContent.indexOf('All Dates') !== -1 || t.textContent.indexOf('202') !== -1) {{
                     t.textContent = activeLabel;
                 }}
             }});
+        }}
+
+        // --- 画面表示範囲の最大キャリーを探索してハイライトを移動 ---
+        function updateVisibleMaxCarry(gd, targetRange) {{
+            if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
+            var curX0 = targetRange ? targetRange[0] : gd._fullLayout.xaxis.range[0];
+            var curX1 = targetRange ? targetRange[1] : gd._fullLayout.xaxis.range[1];
+            var curSpan = curX1 - curX0;
+
+            var maxShot = null;
+            var maxVal = -Infinity;
+            for (var i = 0; i < shotCarryList.length; i++) {{
+                var s = shotCarryList[i];
+                if (s.x >= curX0 && s.x <= curX1) {{
+                    if (s.carry > maxVal) {{
+                        maxVal = s.carry;
+                        maxShot = s;
+                    }}
+                }}
+            }}
+
+            if (maxShot) {{
+                var isDefault = (curSpan >= totalShots * 0.7);
+                var labelText = isDefault ? 
+                    ("<b>All-Time Max: " + Math.round(maxVal) + " yds</b>") : 
+                    ("<b>Max: " + Math.round(maxVal) + " yds</b>");
+
+                Plotly.restyle(gd, {{
+                    'x': [[maxShot.x]],
+                    'y': [[maxShot.carry]],
+                    'text': [[labelText]],
+                    'visible': true
+                }}, [maxTraceIdx]);
+            }} else {{
+                Plotly.restyle(gd, {{ 'visible': false }}, [maxTraceIdx]);
+            }}
         }}
 
         // 1. ポップアップ要素の生成
@@ -679,7 +730,7 @@ def plot_trackman_plotly(
         tooltip.style.maxWidth = '360px';
         document.body.appendChild(tooltip);
 
-        // 2. グラフ上のマウス移動を座標計算して日付エリアを判定
+        // 2. 日付ホバー判定
         document.addEventListener('mousemove', function(e) {{
             var gd = document.getElementsByClassName('plotly-graph-div')[0];
             if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
@@ -689,13 +740,11 @@ def plot_trackman_plotly(
             var mousePixelX = e.clientX - rect.left - fl.xaxis._offset;
             var mousePixelY = e.clientY - rect.top;
 
-            // X軸プロット範囲外
             if (mousePixelX < 0 || mousePixelX > fl.xaxis._length) {{
                 tooltip.style.display = 'none';
                 return;
             }}
 
-            // 上段プロット or 下段プロットの領域内か判定
             var inRow1 = (mousePixelY >= fl.yaxis._offset && mousePixelY <= fl.yaxis._offset + fl.yaxis._length);
             var inRow2 = (mousePixelY >= fl.yaxis2._offset && mousePixelY <= fl.yaxis2._offset + fl.yaxis2._length);
 
@@ -704,11 +753,8 @@ def plot_trackman_plotly(
                 return;
             }}
 
-            // ピクセルX座標をShot番号(Data X)に変換
             var xRange = fl.xaxis.range;
             var dataX = xRange[0] + (mousePixelX / fl.xaxis._length) * (xRange[1] - xRange[0]);
-
-            // 画面上で文字幅(約20px)に相当するData X許容幅を算出
             var thresholdDataX = Math.max(0.5, (20 / fl.xaxis._length) * (xRange[1] - xRange[0]));
 
             var matchedDate = null;
@@ -733,7 +779,7 @@ def plot_trackman_plotly(
             }}
         }});
 
-        // 3. ナビゲーションボタン操作 ＆ ドロップダウン連動
+        // 3. ナビゲーションボタン操作 ＆ 同期
         document.addEventListener('click', function(e) {{
             var item = e.target.closest('g.updatemenu-item-group, g.updatemenu-button, .updatemenu-button');
             if (!item) return;
@@ -796,17 +842,22 @@ def plot_trackman_plotly(
                     'xaxis2.range': target
                 }}).then(function() {{
                     updateDropdownLabel(gd, target);
+                    updateVisibleMaxCarry(gd, target);
                 }});
             }}
         }}, true);
 
-        // 4. 手動ドラッグ(Pan/Zoom)やResetボタン時にもドロップダウンラベルを追従
+        // 4. 手動ドラッグ(Pan/Zoom)・Reset時にも同期追従
         window.addEventListener('load', function() {{
             var gd = document.getElementsByClassName('plotly-graph-div')[0];
             if (gd && gd.on) {{
+                var relayoutTimer = null;
                 gd.on('plotly_relayout', function(eventdata) {{
-                    // ボタンクリック経由でない直接リレイアウト時にも同期
-                    setTimeout(function() {{ updateDropdownLabel(gd); }}, 50);
+                    clearTimeout(relayoutTimer);
+                    relayoutTimer = setTimeout(function() {{
+                        updateDropdownLabel(gd);
+                        updateVisibleMaxCarry(gd);
+                    }}, 60);
                 }});
             }}
         }});
@@ -828,9 +879,9 @@ if __name__ == "__main__":
         fig.write_html(html_file, post_script=post_js)
         print(f"Saved to {html_file}")
 
-        if platform.system() == "Darwin":  # macOS
+        if platform.system() == "Darwin":
             subprocess.run(["open", html_file])
         elif platform.system() == "Windows":
             os.startfile(html_file)
-        else:  # Linux
+        else:
             subprocess.run(["xdg-open", html_file])
