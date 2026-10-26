@@ -1,190 +1,489 @@
-import matplotlib.pyplot as plt
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import subprocess
+import webbrowser
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 
-def plot_golf_shots(
-    df_or_path,
-    mode="two_panel",  # 'two_panel' (二段組) または 'single' (上段のみ)
-    xlim=None,  # None の場合は (0, len(df) + 5)
-    carry_ylim=(0, 150),
-    ball_speed_lim=(0, 50),
-    peak_height_samples=[5, 10, 15, 20, 30],
-    launch_angle_samples=[10, 20, 30, 40],
-    height_scale=10,  # 最高到達点の円サイズ倍率
-    launch_scale=5,  # 打出角の円サイズ倍率
-    save_path=None,  # 保存先ファイルパス (例: 'output.png')
-    title=None,  # 図のタイトル（例: '2026-08-12'）
-):
-    """ゴルフショットのデータを散布図化する関数"""
-    # データの読み込み・コピー
-    if isinstance(df_or_path, str):
-        df = pd.read_csv(df_or_path)
-    else:
-        df = df_or_path.copy()
+def parse_left_right_y(val):
+    """左右打出角の文字列（左=プラス, 右=マイナス, 欠損・'-'=NaN）を数値変換"""
+    if pd.isna(val):
+        return np.nan
+    val_str = str(val).strip()
+    if val_str in ["-", "--", "", "nan", "None"]:
+        return np.nan
+    try:
+        if "右" in val_str:
+            return -float(val_str.replace("右", "").strip())
+        elif "左" in val_str:
+            return float(val_str.replace("左", "").strip())
+        else:
+            return float(val_str)
+    except (ValueError, TypeError):
+        return np.nan
 
-    # 数値列の '-' や欠損値を安全に NaN へ一括変換
-    numeric_cols = [
-        "No.",
-        "キャリー (yds)",
-        "ボールスピード (m/s)",
-        "最高到達点 (yds)",
-        "打出角 (度)",
-    ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # No.列の確保 (1から連番)
-    if "No." not in df.columns or df["No."].isnull().any():
-        df["No."] = range(1, len(df) + 1)
+def load_and_aggregate_trackman_data(data_dir="data"):
+    """
+    フラットな 'data/YYYY-MM-DD.csv' を探索・結合。
+    （旧形式 'YYYY-MM-DD range/*.csv' もフォールバックで検出可能）
+    """
+    root = Path(data_dir)
+    if not root.exists():
+        # カレントディレクトリ自体が対象の場合のフォールバック
+        root = Path(".")
 
-    # xlimの自動設定（未指定の場合はデータ件数 + 5）
-    if xlim is None:
-        xlim = (0, len(df) + 5)
+    csv_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2})\.csv$")
+    folder_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})\s+range")
 
-    # 左右打出角の数値変換（左=プラス, 右=マイナス, '-'=NaN）
-    def parse_left_right_y(val):
-        if pd.isna(val):
-            return np.nan
-        val_str = str(val).strip()
-        if val_str in ["-", ""]:
-            return np.nan
+    items = []
+
+    # 1. 新形式: data/YYYY-MM-DD.csv を優先走査
+    for f in root.glob("*.csv"):
+        m = csv_pattern.match(f.name)
+        if m:
+            items.append((m.group(1), f))
+
+    # 2. 旧形式: data/YYYY-MM-DD range/*.csv の残骸があればフォールバック
+    if not items:
+        for p in root.rglob("*"):
+            if p.is_dir():
+                m = folder_pattern.search(p.name)
+                if m:
+                    for csv_file in sorted(p.glob("*.csv")):
+                        items.append((m.group(1), csv_file))
+
+    items.sort(key=lambda x: x[0])
+
+    dfs = []
+    for date_str, file_path in items:
         try:
-            if "右" in val_str:
-                return -float(val_str.replace("右", ""))
-            elif "左" in val_str:
-                return float(val_str.replace("左", ""))
+            df = pd.read_csv(file_path)
+            df["date"] = date_str
+
+            if "No." not in df.columns or df["No."].isnull().any():
+                df["session_shot_no"] = range(1, len(df) + 1)
             else:
-                return float(val_str)
-        except ValueError:
-            return np.nan
+                df["session_shot_no"] = pd.to_numeric(
+                    df["No."], errors="coerce"
+                ).fillna(range(1, len(df) + 1))
 
-    if "左右打出角 (度)" in df.columns:
-        df["左右打出角_y"] = df["左右打出角 (度)"].apply(parse_left_right_y)
-    if "打出角 (度)" in df.columns:
-        df["打出角_num"] = df["打出角 (度)"]
+            dfs.append(df)
+        except Exception as e:
+            print(f"Failed to read {file_path}: {e}")
 
-    # Club-type 列の確保（未指定時はデフォルト 9i）
-    if "Club-type" not in df.columns:
-        df["Club-type"] = "9i"
+    if not dfs:
+        print(f"No valid TrackMan CSV files found in '{data_dir}'.")
+        return pd.DataFrame()
+
+    full_df = pd.concat(dfs, ignore_index=True)
+    full_df["global_shot_no"] = range(1, len(full_df) + 1)
+
+    # 数値列の安全な型変換（'-' 等の欠損値を NaN に強制変換）
+    num_cols = ["キャリー (yds)", "ボールスピード (m/s)", "最高到達点 (yds)", "打出角 (度)"]
+    for col in num_cols:
+        if col in full_df.columns:
+            full_df[col] = pd.to_numeric(full_df[col], errors="coerce")
+
+    # Club-type の確保
+    if "Club-type" not in full_df.columns:
+        full_df["Club-type"] = "9i"
     else:
-        df["Club-type"] = df["Club-type"].fillna("9i").astype(str).str.strip()
+        full_df["Club-type"] = (
+            full_df["Club-type"].fillna("9i").astype(str).str.strip()
+        )
 
-    def get_marker_and_label(club_name):
+    if "左右打出角 (度)" in full_df.columns:
+        full_df["左右打出角_y"] = full_df["左右打出角 (度)"].apply(
+            parse_left_right_y
+        )
+    else:
+        full_df["左右打出角_y"] = np.nan
+
+    if "打出角 (度)" in full_df.columns:
+        full_df["打出角_num"] = full_df["打出角 (度)"].fillna(0.0)
+    else:
+        full_df["打出角_num"] = 0.0
+
+    if "最高到達点 (yds)" in full_df.columns:
+        full_df["最高到達点_num"] = full_df["最高到達点 (yds)"].fillna(0.0)
+    else:
+        full_df["最高到達点_num"] = 0.0
+
+    return full_df
+
+
+def plot_trackman_plotly(
+    df,
+    height_scale=1.0,
+    launch_scale=0.6,
+    min_peak_height=3,
+    min_launch_angle=5,
+    peak_height_samples=[3, 10, 20, 30],
+    launch_angle_samples=[5, 10, 20, 30, 40],
+):
+    """Plotlyによる2段組インタラクティブ散布図"""
+    if df.empty:
+        print("DataFrame is empty.")
+        return None, ""
+
+    def get_club_symbol_and_label(club_name):
         c = club_name.lower()
         if c == "7i":
-            return "^", "7i"
+            return "triangle-up", "7i"
         elif c in ["driver", "1w", "dr"]:
-            return "s", "Driver"
-        return "o", club_name  # 9i and default
+            return "square", "Driver"
+        return "circle", club_name
 
-    # スタイル設定
-    plt.rcParams["axes.spines.top"] = False
-    plt.rcParams["axes.spines.right"] = False
-    plt.rcParams["font.family"] = ["Arial"]
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        subplot_titles=(
+            "Carry & Peak Height",
+            "Horiz. Launch Angle & Launch Angle",
+        ),
+    )
 
-    vmin, vmax = ball_speed_lim
-    is_two_panel = mode == "two_panel"
+    # ツールチップ用テキスト
+    def fmt_val(val, unit=""):
+        if pd.isna(val):
+            return "N/A"
+        if isinstance(val, (int, float, np.floating, np.integer)):
+            return f"{val:.1f}{unit}"
+        return f"{val}{unit}"
 
-    # Figureの作成
-    if is_two_panel:
-        fig, (ax1, ax2) = plt.subplots(
-            2, 1, figsize=(8, 8), dpi=200, sharex=True
+    hover_top = {
+        idx: (
+            f"<b>Date:</b> {row['date']}<br>"
+            f"<b>Club:</b> {row['Club-type']}<br>"
+            f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
+            f"<b>Carry:</b> {fmt_val(row.get('キャリー (yds)'), ' yds')}<br>"
+            f"<b>Ball Speed:</b> {fmt_val(row.get('ボールスピード (m/s)'), ' m/s')}<br>"
+            f"<b>Peak Height:</b> {fmt_val(row.get('最高到達点 (yds)'), ' yds')}"
         )
-    else:
-        fig, ax1 = plt.subplots(1, 1, figsize=(8, 4.5), dpi=200)
-        ax2 = None
+        for idx, row in df.iterrows()
+    }
 
-    # --------------------------------------------------
-    # 1段目 (ax1) & 2段目 (ax2): プロット描画
-    # --------------------------------------------------
-    scatter1 = None
-    for club in df["Club-type"].unique():
+    hover_bottom = {
+        idx: (
+            f"<b>Date:</b> {row['date']}<br>"
+            f"<b>Club:</b> {row['Club-type']}<br>"
+            f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
+            f"<b>Horiz. Launch:</b> {fmt_val(row.get('左右打出角_y'), '°')}<br>"
+            f"<b>Ball Speed:</b> {fmt_val(row.get('ボールスピード (m/s)'), ' m/s')}<br>"
+            f"<b>Launch Angle:</b> {fmt_val(row.get('打出角 (度)'), '°')}"
+        )
+        for idx, row in df.iterrows()
+    }
+
+    # 最小サイズの適用
+    df["peak_height_sizes"] = (
+        df["最高到達点_num"].clip(lower=min_peak_height) * height_scale
+    )
+    df["launch_angle_sizes"] = (
+        df["打出角_num"].clip(lower=min_launch_angle) * launch_scale
+    )
+
+    # --- 散布図プロット (ax1 & ax2) ---
+    unique_clubs = df["Club-type"].unique()
+    colorbar_shown = False
+
+    COLORMAP = "Turbo"
+
+    for club in unique_clubs:
         sub = df[df["Club-type"] == club]
-        m, _ = get_marker_and_label(club)
+        sym, _ = get_club_symbol_and_label(club)
 
-        # 1段目 (ax1): 飛距離・高さ・球速
-        scatter1 = ax1.scatter(
-            sub["No."],
-            sub["キャリー (yds)"],
-            c=sub["ボールスピード (m/s)"],
-            s=sub["最高到達点 (yds)"] * height_scale,
-            cmap="Blues",
-            alpha=0.8,
-            edgecolors="navy",
-            marker=m,
-            linewidths=0.8,
-            vmin=vmin,
-            vmax=vmax,
+        # 1段目 (Carry)
+        show_cbar = not colorbar_shown
+        scatter1 = go.Scatter(
+            x=sub["global_shot_no"],
+            y=sub["キャリー (yds)"],
+            mode="markers",
+            hoverinfo="text",
+            hovertext=[hover_top[idx] for idx in sub.index],
+            showlegend=False,
+            marker=dict(
+                symbol=sym,
+                size=sub["peak_height_sizes"],
+                color=sub["ボールスピード (m/s)"],
+                colorscale=COLORMAP,
+                cmin=0,
+                cmax=50,
+                showscale=show_cbar,
+                colorbar=dict(
+                    title=dict(
+                        text="Ball Speed (m/s)",
+                        side="right",
+                        font=dict(size=13),
+                    ),
+                    thickness=15,
+                    x=1.02,
+                    len=0.85,
+                    y=0.5,
+                    yanchor="middle",
+                )
+                if show_cbar
+                else None,
+                line=dict(width=0.8, color="#222222"),
+                opacity=0.85,
+            ),
+            name="Carry",
+        )
+        fig.add_trace(scatter1, row=1, col=1)
+        colorbar_shown = True
+
+        # 2段目 (左右打出角)
+        scatter2 = go.Scatter(
+            x=sub["global_shot_no"],
+            y=sub["左右打出角_y"],
+            mode="markers",
+            hoverinfo="text",
+            hovertext=[hover_bottom[idx] for idx in sub.index],
+            showlegend=False,
+            marker=dict(
+                symbol=sym,
+                size=sub["launch_angle_sizes"],
+                color=sub["ボールスピード (m/s)"],
+                colorscale=COLORMAP,
+                cmin=0,
+                cmax=50,
+                showscale=False,
+                line=dict(width=0.8, color="#222222"),
+                opacity=0.85,
+            ),
+            name="Horiz Launch Angle",
+        )
+        fig.add_trace(scatter2, row=2, col=1)
+
+    # 初期最大キャリー値の取得
+    initial_max_carry = 0
+    initial_max_x = 0
+    if "キャリー (yds)" in df.columns and not df["キャリー (yds)"].dropna().empty:
+        max_idx = df["キャリー (yds)"].idxmax()
+        initial_max_carry = float(df.loc[max_idx, "キャリー (yds)"])
+        initial_max_x = int(df.loc[max_idx, "global_shot_no"])
+
+    # 最大キャリー強調用専用トレース（JSで画面表示範囲に合わせて動的に位置とテキストを書き換え）
+    fig.add_trace(
+        go.Scatter(
+            x=[initial_max_x],
+            y=[initial_max_carry],
+            mode="text+markers",
+            text=[f"<b>Max: {int(round(initial_max_carry))} yds</b>"],
+            textposition="top center",
+            textfont=dict(size=13, color="#b71c1c"),
+            marker=dict(
+                symbol="star",
+                size=16,
+                color="red",
+                line=dict(width=1.5, color="black"),
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+            name="MaxCarryHighlight",
+        ),
+        row=1,
+        col=1,
+    )
+    max_trace_idx = len(fig.data) - 1
+
+    # JSでの高速最大値探索用ショットリスト
+    valid_shots = df[["global_shot_no", "キャリー (yds)"]].dropna()
+    shot_carry_list = [
+        {"x": int(r["global_shot_no"]), "carry": float(r["キャリー (yds)"])}
+        for _, r in valid_shots.iterrows()
+    ]
+
+    # 中心線 (0度) — 赤実線
+    fig.add_hline(
+        y=0,
+        line_dash="solid",
+        line_color="red",
+        line_width=1,
+        row=2,
+        col=1,
+        layer="above",
+    )
+
+    # --- 各セッションの区切り破線 ＆ 90°回転日付背景テキスト ＆ 統計辞書作成 ---
+    unique_dates = df["date"].unique()
+    session_ranges = []
+    session_dropdown_buttons = []
+    session_meta = []
+    daily_stats_dict = {}
+
+    initial_xlim = [0, len(df) + 5]
+
+    session_dropdown_buttons.append(
+        dict(
+            label="All Dates",
+            method="relayout",
+            args=[
+                {"xaxis.range": initial_xlim, "xaxis2.range": initial_xlim}
+            ],
+        )
+    )
+
+    for i, date_str in enumerate(unique_dates):
+        sub = df[df["date"] == date_str]
+        start_x = int(sub["global_shot_no"].min())
+        end_x = int(sub["global_shot_no"].max())
+        s_range = [start_x - 1, end_x + 1]
+        session_ranges.append(s_range)
+
+        text_x = start_x - 0.2
+        session_meta.append({"date": date_str, "x": text_x})
+
+        session_dropdown_buttons.append(
+            dict(
+                label=f"{date_str} ({len(sub)} shots)",
+                method="relayout",
+                args=[{"xaxis.range": s_range, "xaxis2.range": s_range}],
+            )
         )
 
-        # 2段目 (ax2): 左右打出角・打出角 (二段組時のみ)
-        if is_two_panel and ax2 is not None:
-            ax2.scatter(
-                sub["No."],
-                sub["左右打出角_y"],
-                c=sub["ボールスピード (m/s)"],
-                s=sub["打出角_num"] * launch_scale,
-                cmap="Blues",
-                alpha=0.8,
-                edgecolors="navy",
-                marker=m,
-                linewidths=0.8,
-                vmin=vmin,
-                vmax=vmax,
+        if i > 0:
+            sep_x = start_x - 0.5
+            fig.add_vline(
+                x=sep_x,
+                line_dash="dot",
+                line_color="rgba(100, 100, 100, 0.6)",
+                line_width=1.5,
+                row=1,
+                col=1,
+            )
+            fig.add_vline(
+                x=sep_x,
+                line_dash="dot",
+                line_color="rgba(100, 100, 100, 0.6)",
+                line_width=1.5,
+                row=2,
+                col=1,
             )
 
-    # 最大キャリー値のテキスト追加
-    if "キャリー (yds)" in df.columns and df["キャリー (yds)"].notnull().any():
-        max_idx = df["キャリー (yds)"].idxmax()
-        max_carry = df.loc[max_idx, "キャリー (yds)"]
-        max_no = df.loc[max_idx, "No."]
+        # --- クラブごとの詳細統計サマリーの生成 ---
+        club_stats_blocks = []
+        for c_name in sub["Club-type"].unique():
+            c_sub = sub[sub["Club-type"] == c_name]
+            n_c = len(c_sub)
 
-        ax1.text(
-            max_no,
-            max_carry + 10,
-            f"{int(round(max_carry))} yds",
-            fontsize=10,
-            fontweight="normal",
-            va="center",
-            ha="center",
-            color="black",
+            # キャリー
+            c_carry = c_sub["キャリー (yds)"].dropna()
+            c_max_carry = c_carry.max()
+            c_avg_carry = c_carry.mean()
+            c_sd_carry = c_carry.std()
+
+            carry_str = "N/A"
+            if not c_carry.empty:
+                sd_part = f" ± {c_sd_carry:.1f}" if pd.notna(c_sd_carry) else ""
+                carry_str = f"avg {c_avg_carry:.1f}{sd_part} yds (max {c_max_carry:.1f})"
+
+            # ボールスピード
+            c_speed = c_sub["ボールスピード (m/s)"].dropna()
+            c_max_speed = c_speed.max()
+            c_avg_speed = c_speed.mean()
+            c_sd_speed = c_speed.std()
+
+            speed_str = "N/A"
+            if not c_speed.empty:
+                sd_part = f" ± {c_sd_speed:.1f}" if pd.notna(c_sd_speed) else ""
+                speed_str = f"avg {c_avg_speed:.1f}{sd_part} m/s (max {c_max_speed:.1f})"
+
+            # 打出角
+            c_launch = c_sub["打出角 (度)"].dropna()
+            launch_str = f"{c_launch.mean():.1f}°" if not c_launch.empty else "N/A"
+
+            # 左右打出角
+            c_horiz = c_sub["左右打出角_y"].dropna()
+            if not c_horiz.empty:
+                h_mean = c_horiz.mean()
+                if h_mean > 0.3:
+                    horiz_str = f"L {abs(h_mean):.1f}°"
+                elif h_mean < -0.3:
+                    horiz_str = f"R {abs(h_mean):.1f}°"
+                else:
+                    horiz_str = f"Straight ({h_mean:+.1f}°)"
+            else:
+                horiz_str = "N/A"
+
+            block = (
+                f"<div style='margin-bottom:6px;'>"
+                f"<b>【 {c_name} 】</b> ({n_c} shots)<br>"
+                f"  • <b>Carry:</b> {carry_str}<br>"
+                f"  • <b>Speed:</b> {speed_str}<br>"
+                f"  • <b>Launch:</b> avg {launch_str} | <b>Horiz:</b> {horiz_str}"
+                f"</div>"
+            )
+            club_stats_blocks.append(block)
+
+        stats_html = (
+            f"<div style='font-family:sans-serif; font-size:13px; line-height:1.4; color:#222;'>"
+            f"<div style='font-size:14px; font-weight:bold; border-bottom:1px solid #ccc; padding-bottom:4px; margin-bottom:6px;'>"
+            f"📅 Session: {date_str} (Total {len(sub)} shots)</div>"
+            + "".join(club_stats_blocks)
+            + "</div>"
+        )
+        daily_stats_dict[date_str] = stats_html
+
+        # 1段目 (Carry) 90° 回転背景日付
+        fig.add_annotation(
+            x=text_x,
+            y=0.95,
+            xref="x",
+            yref="y domain",
+            text=f"<b>{date_str}</b>",
+            showarrow=False,
+            textangle=-90,
+            font=dict(size=18, color="rgba(160, 160, 160, 0.45)"),
+            xanchor="left",
+            yanchor="top",
+        )
+        # 2段目 (Angle) 90° 回転背景日付
+        fig.add_annotation(
+            x=text_x,
+            y=0.95,
+            xref="x",
+            yref="y2 domain",
+            text=f"<b>{date_str}</b>",
+            showarrow=False,
+            textangle=-90,
+            font=dict(size=18, color="rgba(160, 160, 160, 0.45)"),
+            xanchor="left",
+            yanchor="top",
         )
 
-    ax1.set_xlabel("Shot #", labelpad=12, fontsize=14)
-    ax1.set_ylabel("Carry (yds)", labelpad=14, fontsize=12)
-    ax1.set_xlim(xlim[0], xlim[1])
-    ax1.set_ylim(carry_ylim[0], carry_ylim[1])
-    ax1.tick_params(labelbottom=True)
-
-    # 1段目の凡例1（Peak Height）
-    legend_handles1 = [
-        plt.scatter(
-            [],
-            [],
-            c="none",
-            s=h * height_scale,
-            edgecolors="navy",
-            linewidths=0.8,
-            label=f"{h} yds",
-        )
-        for h in peak_height_samples
-    ]
-    leg1 = ax1.legend(
-        handles=legend_handles1,
-        title="Peak Height",
-        loc="center left",
-        bbox_to_anchor=(1.22, 0.35),
-        frameon=False,
-        labelspacing=0.8,
-        borderpad=0.8,
-        borderaxespad=0.0,
+    # --- フローティング L / R テキスト ---
+    fig.add_annotation(
+        x=0.01,
+        y=0.95,
+        xref="x domain",
+        yref="y2 domain",
+        text="<b>L</b>",
+        showarrow=False,
+        font=dict(size=22, color="navy"),
+        align="left",
     )
-    ax1.add_artist(leg1)
+    fig.add_annotation(
+        x=0.01,
+        y=0.05,
+        xref="x domain",
+        yref="y2 domain",
+        text="<b>R</b>",
+        showarrow=False,
+        font=dict(size=22, color="navy"),
+        align="left",
+    )
 
-    # 1段目の凡例2（Club-type）
-    unique_clubs = df["Club-type"].unique()
+    # --- 凡例1: Club-type ---
     ordered_clubs = []
     for std_c in ["9i", "7i", "driver", "1w"]:
         for c in unique_clubs:
@@ -194,101 +493,413 @@ def plot_golf_shots(
         if c not in ordered_clubs:
             ordered_clubs.append(c)
 
-    club_legend_handles = []
     for club in ordered_clubs:
-        m, label = get_marker_and_label(club)
-        h = plt.scatter(
-            [],
-            [],
-            c="none",
-            s=80,
-            edgecolors="navy",
-            marker=m,
-            linewidths=0.8,
-            label=label,
+        sym, label = get_club_symbol_and_label(club)
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(
+                    symbol=sym,
+                    size=10,
+                    color="rgba(0,0,0,0)",
+                    line=dict(width=1.2, color="navy"),
+                ),
+                name=label,
+                legendgroup="club_type",
+                legendgrouptitle_text="<b>Club</b>",
+                showlegend=True,
+            )
         )
-        club_legend_handles.append(h)
 
-    ax1.legend(
-        handles=club_legend_handles,
-        title="Club",
-        loc="center left",
-        bbox_to_anchor=(1.22, 0.85),
-        frameon=False,
-        labelspacing=0.6,
-        borderpad=0.6,
-        borderaxespad=0.0,
+    # --- 凡例2: Peak Height ---
+    for h in peak_height_samples:
+        size_val = max(h, min_peak_height) * height_scale
+        label_text = (
+            f"≤ {min_peak_height} yds" if h <= min_peak_height else f"{h} yds"
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(
+                    size=size_val,
+                    color="rgba(0,0,0,0)",
+                    line=dict(width=1.2, color="navy"),
+                ),
+                name=label_text,
+                legendgroup="peak_height",
+                legendgrouptitle_text="<b>Peak Height</b>",
+                showlegend=True,
+            )
+        )
+
+    # --- 凡例3: Launch Angle ---
+    for a in launch_angle_samples:
+        size_val = max(a, min_launch_angle) * launch_scale
+        label_text = (
+            f"≤ {min_launch_angle}°" if a <= min_launch_angle else f"{a}°"
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(
+                    size=size_val,
+                    color="rgba(0,0,0,0)",
+                    line=dict(width=1.2, color="navy"),
+                ),
+                name=label_text,
+                legendgroup="launch_angle",
+                legendgrouptitle_text="<b>Launch Angle</b>",
+                showlegend=True,
+            )
+        )
+
+    # --- 軸設定 ---
+    fig.update_yaxes(
+        title_text="Carry (yds)", range=[0, 160], fixedrange=True, row=1, col=1
+    )
+    fig.update_yaxes(
+        title_text="Horiz. Launch Angle (deg)",
+        range=[-35, 35],
+        fixedrange=True,
+        row=2,
+        col=1,
+    )
+    fig.update_xaxes(
+        title_text="Total Shot # (Horizontal Pan/Zoom Enabled)",
+        range=initial_xlim,
+        row=2,
+        col=1,
     )
 
-    # --------------------------------------------------
-    # 2段目 (ax2) 装飾・凡例
-    # --------------------------------------------------
-    if is_two_panel and ax2 is not None:
-        ax2.axhline(0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
-        ax2.set_xlabel("Shot #", labelpad=12, fontsize=14)
-        ax2.set_ylabel("Horiz. Launch Angle (deg)", labelpad=12, fontsize=12)
-        ax2.set_ylim(-35, 35)
+    # --- ボタン ＆ ドロップダウン設定 ---
+    updatemenus = [
+        dict(
+            type="buttons",
+            direction="right",
+            x=0.01,
+            y=1.13,
+            xanchor="left",
+            yanchor="top",
+            pad=dict(r=4, t=6),
+            buttons=[
+                dict(label="<", method="skip"),
+                dict(label=">", method="skip"),
+                dict(label="+", method="skip"),
+                dict(label="-", method="skip"),
+                dict(
+                    label="Pan",
+                    method="relayout",
+                    args=["dragmode", "pan"],
+                ),
+                dict(
+                    label="Zoom",
+                    method="relayout",
+                    args=["dragmode", "zoom"],
+                ),
+                dict(
+                    label="Reset",
+                    method="relayout",
+                    args=[
+                        {
+                            "xaxis.range": initial_xlim,
+                            "xaxis2.range": initial_xlim,
+                        }
+                    ],
+                ),
+            ],
+        ),
+        dict(
+            type="dropdown",
+            direction="down",
+            x=0.38,
+            y=1.13,
+            xanchor="left",
+            yanchor="top",
+            pad=dict(r=6, t=6),
+            buttons=session_dropdown_buttons,
+        ),
+    ]
 
-        ax2.text(
-            0.02,
-            0.02,
-            "R",
-            transform=ax2.transAxes,
-            fontsize=18,
-            fontweight="bold",
-            ha="left",
-            va="bottom",
-        )
-        ax2.text(
-            0.02,
-            0.98,
-            "L",
-            transform=ax2.transAxes,
-            fontsize=18,
-            fontweight="bold",
-            ha="left",
-            va="top",
-        )
+    fig.update_layout(
+        title=dict(
+            text="TrackMan All Session Analysis",
+            font=dict(size=18),
+            y=0.98,
+        ),
+        height=820,
+        dragmode="pan",
+        updatemenus=updatemenus,
+        template="plotly_white",
+        showlegend=True,
+        legend=dict(
+            x=1.08,
+            y=0.5,
+            yanchor="middle",
+            title_font_size=12,
+            bordercolor="rgba(0,0,0,0.1)",
+            borderwidth=1,
+        ),
+        margin=dict(t=120, b=60, l=80, r=170),
+    )
 
-        # 2段目の凡例（Launch Angle）
-        legend_handles2 = [
-            plt.scatter(
-                [],
-                [],
-                c="none",
-                s=a * launch_scale,
-                edgecolors="navy",
-                linewidths=0.8,
-                label=f"{a}°",
-            )
-            for a in launch_angle_samples
-        ]
-        ax2.legend(
-            handles=legend_handles2,
-            title="Launch Angle",
-            loc="center left",
-            bbox_to_anchor=(1.22, 0.5),
-            frameon=False,
-            labelspacing=0.8,
-            borderpad=0.8,
-            borderaxespad=0.0,
-        )
+    # 永続的なグローバルイベントリスナー ＆ 幾何座標ベースの日付ホバー ＆ ドロップダウン同期 ＆ 画面内最大キャリー動的追従
+    post_script = f"""
+    (function() {{
+        var sessionRanges = {json.dumps(session_ranges)};
+        var sessionMeta = {json.dumps(session_meta)};
+        var dailyStats = {json.dumps(daily_stats_dict)};
+        var shotCarryList = {json.dumps(shot_carry_list)};
+        var totalShots = {len(df) + 5};
+        var maxTraceIdx = {max_trace_idx};
 
-    # --------------------------------------------------
-    # 共通カラーバー（Ball Speed）
-    # --------------------------------------------------
-    fig.subplots_adjust(right=0.75)
-    cbar_ax = fig.add_axes([0.80, 0.15, 0.03, 0.7])
-    cbar = fig.colorbar(scatter1, cax=cbar_ax)
-    cbar.set_label("Ball Speed (m/s)", fontsize=14)
+        // --- ドロップダウンメニューのラベル同期関数 ---
+        function updateDropdownLabel(gd, targetRange) {{
+            if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
+            var curX0 = targetRange ? targetRange[0] : gd._fullLayout.xaxis.range[0];
+            var curX1 = targetRange ? targetRange[1] : gd._fullLayout.xaxis.range[1];
+            var curSpan = curX1 - curX0;
+            var curCenter = (curX0 + curX1) / 2;
 
-    # 図タイトル（任意）
-    if title is not None:
-        fig.suptitle(title, y=0.98, fontsize=16)
+            var activeLabel = "All Dates";
+            if (curSpan < totalShots * 0.7) {{
+                var closestIdx = 0;
+                var minDiff = Infinity;
+                for (var i = 0; i < sessionRanges.length; i++) {{
+                    var sCenter = (sessionRanges[i][0] + sessionRanges[i][1]) / 2;
+                    var diff = Math.abs(curCenter - sCenter);
+                    if (diff < minDiff) {{
+                        minDiff = diff;
+                        closestIdx = i;
+                    }}
+                }}
+                if (sessionMeta[closestIdx]) {{
+                    var matched = dailyStats[sessionMeta[closestIdx].date];
+                    var shotCountMatch = matched ? matched.match(/Total (\\d+) shots/) : null;
+                    var countStr = shotCountMatch ? " (" + shotCountMatch[1] + " shots)" : "";
+                    activeLabel = sessionMeta[closestIdx].date + countStr;
+                }}
+            }}
 
-    # 保存処理
-    if save_path:
-        plt.savefig(save_path, bbox_inches="tight", dpi=200)
+            var menus = gd.querySelectorAll('.updatemenu-container g.updatemenu-header-group text, .updatemenu-container g.updatemenu-button text');
+            menus.forEach(function(t) {{
+                if (t.textContent.indexOf('shots') !== -1 || t.textContent.indexOf('All Dates') !== -1 || t.textContent.indexOf('202') !== -1) {{
+                    t.textContent = activeLabel;
+                }}
+            }});
+        }}
 
-    plt.show()
-    return fig
+        // --- 画面表示範囲の最大キャリーを探索してハイライトを移動 ---
+        function updateVisibleMaxCarry(gd, targetRange) {{
+            if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
+            var curX0 = targetRange ? targetRange[0] : gd._fullLayout.xaxis.range[0];
+            var curX1 = targetRange ? targetRange[1] : gd._fullLayout.xaxis.range[1];
+            var curSpan = curX1 - curX0;
+
+            var maxShot = null;
+            var maxVal = -Infinity;
+            for (var i = 0; i < shotCarryList.length; i++) {{
+                var s = shotCarryList[i];
+                if (s.x >= curX0 && s.x <= curX1) {{
+                    if (s.carry > maxVal) {{
+                        maxVal = s.carry;
+                        maxShot = s;
+                    }}
+                }}
+            }}
+
+            if (maxShot) {{
+                var isDefault = (curSpan >= totalShots * 0.7);
+                var labelText = isDefault ? 
+                    ("<b>All-Time Max: " + Math.round(maxVal) + " yds</b>") : 
+                    ("<b>Max: " + Math.round(maxVal) + " yds</b>");
+
+                Plotly.restyle(gd, {{
+                    'x': [[maxShot.x]],
+                    'y': [[maxShot.carry]],
+                    'text': [[labelText]],
+                    'visible': true
+                }}, [maxTraceIdx]);
+            }} else {{
+                Plotly.restyle(gd, {{ 'visible': false }}, [maxTraceIdx]);
+            }}
+        }}
+
+        // 1. ポップアップ要素の生成
+        var tooltip = document.createElement('div');
+        tooltip.id = 'tm-date-tooltip';
+        tooltip.style.position = 'fixed';
+        tooltip.style.display = 'none';
+        tooltip.style.zIndex = '99999';
+        tooltip.style.backgroundColor = 'rgba(255, 255, 255, 0.96)';
+        tooltip.style.border = '1px solid #78909c';
+        tooltip.style.borderRadius = '6px';
+        tooltip.style.padding = '10px 14px';
+        tooltip.style.boxShadow = '0 4px 14px rgba(0,0,0,0.18)';
+        tooltip.style.pointerEvents = 'none';
+        tooltip.style.maxWidth = '360px';
+        document.body.appendChild(tooltip);
+
+        // 2. 日付ホバー判定
+        document.addEventListener('mousemove', function(e) {{
+            var gd = document.getElementsByClassName('plotly-graph-div')[0];
+            if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
+
+            var rect = gd.getBoundingClientRect();
+            var fl = gd._fullLayout;
+            var mousePixelX = e.clientX - rect.left - fl.xaxis._offset;
+            var mousePixelY = e.clientY - rect.top;
+
+            if (mousePixelX < 0 || mousePixelX > fl.xaxis._length) {{
+                tooltip.style.display = 'none';
+                return;
+            }}
+
+            var inRow1 = (mousePixelY >= fl.yaxis._offset && mousePixelY <= fl.yaxis._offset + fl.yaxis._length);
+            var inRow2 = (mousePixelY >= fl.yaxis2._offset && mousePixelY <= fl.yaxis2._offset + fl.yaxis2._length);
+
+            if (!inRow1 && !inRow2) {{
+                tooltip.style.display = 'none';
+                return;
+            }}
+
+            var xRange = fl.xaxis.range;
+            var dataX = xRange[0] + (mousePixelX / fl.xaxis._length) * (xRange[1] - xRange[0]);
+            var thresholdDataX = Math.max(0.5, (20 / fl.xaxis._length) * (xRange[1] - xRange[0]));
+
+            var matchedDate = null;
+            for (var i = 0; i < sessionMeta.length; i++) {{
+                if (Math.abs(dataX - sessionMeta[i].x) <= thresholdDataX) {{
+                    matchedDate = sessionMeta[i].date;
+                    break;
+                }}
+            }}
+
+            if (matchedDate && dailyStats[matchedDate]) {{
+                tooltip.innerHTML = dailyStats[matchedDate];
+                tooltip.style.display = 'block';
+                var posX = e.clientX + 15;
+                var posY = e.clientY + 15;
+                if (posX + 360 > window.innerWidth) posX = e.clientX - 375;
+                if (posY + 260 > window.innerHeight) posY = e.clientY - 270;
+                tooltip.style.left = posX + 'px';
+                tooltip.style.top = posY + 'px';
+            }} else {{
+                tooltip.style.display = 'none';
+            }}
+        }});
+
+        // 3. ナビゲーションボタン操作 ＆ 同期
+        document.addEventListener('click', function(e) {{
+            var item = e.target.closest('g.updatemenu-item-group, g.updatemenu-button, .updatemenu-button');
+            if (!item) return;
+            var textEl = item.querySelector('text') || item;
+            var txt = (textEl.textContent || '').trim();
+            if (['<', '>', '+', '-'].indexOf(txt) === -1) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            var gd = document.getElementsByClassName('plotly-graph-div')[0];
+            if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
+
+            var curX = gd._fullLayout.xaxis.range;
+            var curCenter = (curX[0] + curX[1]) / 2;
+            var curSpan = curX[1] - curX[0];
+            var isDefault = (curSpan >= totalShots * 0.7);
+
+            var closestIdx = 0;
+            var minDiff = Infinity;
+            for (var i = 0; i < sessionRanges.length; i++) {{
+                var sCenter = (sessionRanges[i][0] + sessionRanges[i][1]) / 2;
+                var diff = Math.abs(curCenter - sCenter);
+                if (diff < minDiff) {{
+                    minDiff = diff;
+                    closestIdx = i;
+                }}
+            }}
+
+            var target = null;
+            if (txt === '>') {{
+                if (isDefault) {{
+                    target = sessionRanges[0];
+                }} else {{
+                    var nextIdx = Math.min(sessionRanges.length - 1, closestIdx + 1);
+                    target = sessionRanges[nextIdx];
+                }}
+            }} else if (txt === '<') {{
+                if (isDefault) {{
+                    target = sessionRanges[sessionRanges.length - 1];
+                }} else {{
+                    var prevIdx = Math.max(0, closestIdx - 1);
+                    target = sessionRanges[prevIdx];
+                }}
+            }} else if (txt === '+') {{
+                var newSpan = Math.max(4, curSpan / 2);
+                target = [curCenter - newSpan / 2, curCenter + newSpan / 2];
+            }} else if (txt === '-') {{
+                var newSpan = curSpan * 2;
+                if (newSpan >= totalShots) {{
+                    target = [0, totalShots];
+                }} else {{
+                    target = [Math.max(0, curCenter - newSpan / 2), Math.min(totalShots, curCenter + newSpan / 2)];
+                }}
+            }}
+
+            if (target) {{
+                Plotly.relayout(gd, {{
+                    'xaxis.range': target,
+                    'xaxis2.range': target
+                }}).then(function() {{
+                    updateDropdownLabel(gd, target);
+                    updateVisibleMaxCarry(gd, target);
+                }});
+            }}
+        }}, true);
+
+        // 4. 手動ドラッグ(Pan/Zoom)・Reset時にも同期追従
+        window.addEventListener('load', function() {{
+            var gd = document.getElementsByClassName('plotly-graph-div')[0];
+            if (gd && gd.on) {{
+                var relayoutTimer = null;
+                gd.on('plotly_relayout', function(eventdata) {{
+                    clearTimeout(relayoutTimer);
+                    relayoutTimer = setTimeout(function() {{
+                        updateDropdownLabel(gd);
+                        updateVisibleMaxCarry(gd);
+                    }}, 60);
+                }});
+            }}
+        }});
+    }})();
+    """
+
+    return fig, post_script
+
+
+if __name__ == "__main__":
+    # 再編成後の 'data' ディレクトリを指定
+    df_all = load_and_aggregate_trackman_data("data")
+    print(
+        f"Loaded {len(df_all)} shots from {df_all['date'].nunique() if not df_all.empty else 0} session(s)."
+    )
+
+    if not df_all.empty:
+        fig, post_js = plot_trackman_plotly(df_all)
+        html_file = "index.html"
+        fig.write_html(html_file, post_script=post_js)
+        print(f"Saved to {html_file}")
+
+        if platform.system() == "Darwin":
+            subprocess.run(["open", html_file])
+        elif platform.system() == "Windows":
+            os.startfile(html_file)
+        else:
+            subprocess.run(["xdg-open", html_file])
