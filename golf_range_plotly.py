@@ -29,46 +29,51 @@ def parse_left_right_y(val):
         return np.nan
 
 
-def load_and_aggregate_trackman_data(root_dir="."):
-    """'YYYY-MM-DD range' 形式のフォルダを再帰的に検索して全CSVを統合"""
-    date_folder_pattern = re.compile(r"(\d{4}-\d{2}-\d{2})\s+range")
-    root = Path(root_dir)
+def load_and_aggregate_trackman_data(data_dir="data"):
+    """
+    'data/YYYY-MM-DD.csv' 形式のファイルを読み込んで全セッションを統合
+    """
+    root = Path(data_dir)
+    # 引数に "." が渡された場合でも直下の data ディレクトリを参照
+    if not (root.is_dir() and list(root.glob("*.csv"))) and (Path("data")).is_dir():
+        root = Path("data")
 
-    matched_dirs = []
-    for path in root.rglob("*"):
-        if path.is_dir():
-            match = date_folder_pattern.search(path.name)
-            if match:
-                date_str = match.group(1)
-                matched_dirs.append((date_str, path))
+    csv_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2})\.csv$")
 
-    matched_dirs.sort(key=lambda x: x[0])
+    matched_files = []
+    for csv_file in root.glob("*.csv"):
+        match = csv_pattern.match(csv_file.name)
+        if match:
+            date_str = match.group(1)
+            matched_files.append((date_str, csv_file))
+
+    matched_files.sort(key=lambda x: x[0])
 
     dfs = []
-    for date_str, dir_path in matched_dirs:
-        csv_files = sorted(dir_path.glob("*.csv"))
-        for csv_file in csv_files:
-            try:
-                df = pd.read_csv(csv_file)
-                df["date"] = date_str
+    for date_str, csv_file in matched_files:
+        try:
+            df = pd.read_csv(csv_file)
+            df["date"] = date_str
 
-                if "No." not in df.columns or df["No."].isnull().any():
-                    df["session_shot_no"] = range(1, len(df) + 1)
-                else:
-                    df["session_shot_no"] = df["No."]
+            if "No." not in df.columns or df["No."].isnull().any():
+                df["session_shot_no"] = list(range(1, len(df) + 1))
+            else:
+                numeric_no = pd.to_numeric(df["No."], errors="coerce")
+                fallback_no = pd.Series(range(1, len(df) + 1), index=df.index)
+                df["session_shot_no"] = numeric_no.fillna(fallback_no).astype(int)
 
-                dfs.append(df)
-            except Exception as e:
-                print(f"Failed to read {csv_file}: {e}")
+            dfs.append(df)
+        except Exception as e:
+            print(f"Failed to read {csv_file}: {e}")
 
     if not dfs:
-        print("No CSV files found in 'YYYY-MM-DD range' folders.")
+        print(f"No CSV files found in '{root}'.")
         return pd.DataFrame()
 
     full_df = pd.concat(dfs, ignore_index=True)
     full_df["global_shot_no"] = range(1, len(full_df) + 1)
 
-    # 数値列の安全な型変換（'-' 等の欠損値を NaN に強制変換）
+    # 数値列の安全な型変換
     num_cols = ["キャリー (yds)", "ボールスピード (m/s)", "最高到達点 (yds)", "打出角 (度)"]
     for col in num_cols:
         if col in full_df.columns:
