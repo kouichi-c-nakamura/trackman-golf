@@ -654,11 +654,11 @@ def plot_trackman_plotly(
                 dict(label="-", method="skip"),
             ],
         ),
-        # 2. 距離モード切り替えスイッチ: Carry / Total
+        # 2. 距離モード切り替え: Carry / Total (xを0.20 -> 0.23へ右シフト)
         dict(
             type="buttons",
             direction="right",
-            x=0.20,
+            x=0.23,
             y=1.13,
             xanchor="left",
             yanchor="top",
@@ -669,43 +669,30 @@ def plot_trackman_plotly(
                 dict(label="Total", method="skip"),
             ],
         ),
-        # 3. ツール操作ボタン: Pan, Zoom, Reset
+        # 3. ツール操作: Pan, Zoom, Reset (xを0.33 -> 0.38へ右シフト)
         dict(
             type="buttons",
             direction="right",
-            x=0.33,
+            x=0.38,
             y=1.13,
             xanchor="left",
             yanchor="top",
             pad=dict(r=4, t=6),
             buttons=[
-                dict(
-                    label="Pan",
-                    method="relayout",
-                    args=["dragmode", "pan"],
-                ),
-                dict(
-                    label="Zoom",
-                    method="relayout",
-                    args=["dragmode", "zoom"],
-                ),
+                dict(label="Pan", method="relayout", args=["dragmode", "pan"]),
+                dict(label="Zoom", method="relayout", args=["dragmode", "zoom"]),
                 dict(
                     label="Reset",
                     method="relayout",
-                    args=[
-                        {
-                            "xaxis.range": initial_xlim,
-                            "xaxis2.range": initial_xlim,
-                        }
-                    ],
+                    args=[{"xaxis.range": initial_xlim, "xaxis2.range": initial_xlim}],
                 ),
             ],
         ),
-        # 4. 日付選択ドロップダウン
+        # 4. 日付選択ドロップダウン (xを0.51 -> 0.58へ右シフト)
         dict(
             type="dropdown",
             direction="down",
-            x=0.51,
+            x=0.58,
             y=1.13,
             xanchor="left",
             yanchor="top",
