@@ -34,7 +34,6 @@ def load_and_aggregate_trackman_data(data_dir="data"):
     'data/YYYY-MM-DD.csv' 形式のファイルを読み込んで全セッションを統合
     """
     root = Path(data_dir)
-    # 引数に "." が渡された場合でも直下の data ディレクトリを参照
     if not (root.is_dir() and list(root.glob("*.csv"))) and (Path("data")).is_dir():
         root = Path("data")
 
@@ -73,11 +72,21 @@ def load_and_aggregate_trackman_data(data_dir="data"):
     full_df = pd.concat(dfs, ignore_index=True)
     full_df["global_shot_no"] = range(1, len(full_df) + 1)
 
-    # 数値列の安全な型変換
-    num_cols = ["キャリー (yds)", "ボールスピード (m/s)", "最高到達点 (yds)", "打出角 (度)"]
+    # 数値列の安全な型変換（「トータル (yds)」を明示的に変換）
+    num_cols = [
+        "キャリー (yds)",
+        "トータル (yds)",
+        "ボールスピード (m/s)",
+        "最高到達点 (yds)",
+        "打出角 (度)",
+    ]
     for col in num_cols:
         if col in full_df.columns:
             full_df[col] = pd.to_numeric(full_df[col], errors="coerce")
+
+    # 万が一「トータル (yds)」列がない場合の安全策
+    if "トータル (yds)" not in full_df.columns:
+        full_df["トータル (yds)"] = np.nan
 
     # Club-type の確保
     if "Club-type" not in full_df.columns:
@@ -140,7 +149,6 @@ def plot_trackman_plotly(
         ),
     )
 
-    # ツールチップ用テキスト
     def fmt_val(val, unit=""):
         if pd.isna(val):
             return "N/A"
@@ -148,11 +156,25 @@ def plot_trackman_plotly(
             return f"{val:.1f}{unit}"
         return f"{val}{unit}"
 
-    hover_top = {
+    hover_top_carry = {
         idx: (
             f"<b>Date:</b> {row['date']}<br>"
             f"<b>Club:</b> {row['Club-type']}<br>"
             f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
+            f"<b>Carry:</b> {fmt_val(row.get('キャリー (yds)'), ' yds')}<br>"
+            f"<b>Total:</b> {fmt_val(row.get('トータル (yds)'), ' yds')}<br>"
+            f"<b>Ball Speed:</b> {fmt_val(row.get('ボールスピード (m/s)'), ' m/s')}<br>"
+            f"<b>Peak Height:</b> {fmt_val(row.get('最高到達点 (yds)'), ' yds')}"
+        )
+        for idx, row in df.iterrows()
+    }
+
+    hover_top_total = {
+        idx: (
+            f"<b>Date:</b> {row['date']}<br>"
+            f"<b>Club:</b> {row['Club-type']}<br>"
+            f"<b>Shot:</b> #{row['session_shot_no']} (Total #{row['global_shot_no']})<br>"
+            f"<b>Total:</b> {fmt_val(row.get('トータル (yds)'), ' yds')}<br>"
             f"<b>Carry:</b> {fmt_val(row.get('キャリー (yds)'), ' yds')}<br>"
             f"<b>Ball Speed:</b> {fmt_val(row.get('ボールスピード (m/s)'), ' m/s')}<br>"
             f"<b>Peak Height:</b> {fmt_val(row.get('最高到達点 (yds)'), ' yds')}"
@@ -180,24 +202,44 @@ def plot_trackman_plotly(
         df["打出角_num"].clip(lower=min_launch_angle) * launch_scale
     )
 
-    # --- 散布図プロット (ax1 & ax2) ---
+    # --- 散布図プロット (1段目: Carryトレース & Totalトレース / 2段目: 左右打出角) ---
     unique_clubs = df["Club-type"].unique()
     colorbar_shown = False
-    
     COLORMAP = "Turbo"
+
+    carry_trace_indices = []
+    total_trace_indices = []
 
     for club in unique_clubs:
         sub = df[df["Club-type"] == club]
         sym, _ = get_club_symbol_and_label(club)
 
-        # 1段目 (Carry)
         show_cbar = not colorbar_shown
-        scatter1 = go.Scatter(
+        cbar_cfg = (
+            dict(
+                title=dict(
+                    text="Ball Speed (m/s)",
+                    side="right",
+                    font=dict(size=13),
+                ),
+                thickness=15,
+                x=1.02,
+                len=0.85,
+                y=0.5,
+                yanchor="middle",
+            )
+            if show_cbar
+            else None
+        )
+
+        # 1段目-A: キャリー (yds) トレース (初期表示: visible=True)
+        scatter_carry = go.Scatter(
             x=sub["global_shot_no"],
             y=sub["キャリー (yds)"],
             mode="markers",
+            visible=True,
             hoverinfo="text",
-            hovertext=[hover_top[idx] for idx in sub.index],
+            hovertext=[hover_top_carry[idx] for idx in sub.index],
             showlegend=False,
             marker=dict(
                 symbol=sym,
@@ -207,33 +249,49 @@ def plot_trackman_plotly(
                 cmin=0,
                 cmax=50,
                 showscale=show_cbar,
-                colorbar=dict(
-                    title=dict(
-                        text="Ball Speed (m/s)",
-                        side="right",
-                        font=dict(size=13),
-                    ),
-                    thickness=15,
-                    x=1.02,
-                    len=0.85,
-                    y=0.5,
-                    yanchor="middle",
-                )
-                if show_cbar
-                else None,
+                colorbar=cbar_cfg,
                 line=dict(width=0.8, color="#222222"),
                 opacity=0.85,
             ),
-            name="Carry",
+            name=f"Carry_{club}",
         )
-        fig.add_trace(scatter1, row=1, col=1)
+        fig.add_trace(scatter_carry, row=1, col=1)
+        carry_trace_indices.append(len(fig.data) - 1)
+
+        # 1段目-B: トータル (yds) トレース (初期非表示: visible=False)
+        scatter_total = go.Scatter(
+            x=sub["global_shot_no"],
+            y=sub["トータル (yds)"],
+            mode="markers",
+            visible=False,
+            hoverinfo="text",
+            hovertext=[hover_top_total[idx] for idx in sub.index],
+            showlegend=False,
+            marker=dict(
+                symbol=sym,
+                size=sub["peak_height_sizes"],
+                color=sub["ボールスピード (m/s)"],
+                colorscale=COLORMAP,
+                cmin=0,
+                cmax=50,
+                showscale=show_cbar,
+                colorbar=cbar_cfg,
+                line=dict(width=0.8, color="#222222"),
+                opacity=0.85,
+            ),
+            name=f"Total_{club}",
+        )
+        fig.add_trace(scatter_total, row=1, col=1)
+        total_trace_indices.append(len(fig.data) - 1)
+
         colorbar_shown = True
 
-        # 2段目 (左右打出角)
+        # 2段目: 左右打出角 (常に表示)
         scatter2 = go.Scatter(
             x=sub["global_shot_no"],
             y=sub["左右打出角_y"],
             mode="markers",
+            visible=True,
             hoverinfo="text",
             hovertext=[hover_bottom[idx] for idx in sub.index],
             showlegend=False,
@@ -248,7 +306,7 @@ def plot_trackman_plotly(
                 line=dict(width=0.8, color="#222222"),
                 opacity=0.85,
             ),
-            name="Horiz Launch Angle",
+            name=f"Horiz_{club}",
         )
         fig.add_trace(scatter2, row=2, col=1)
 
@@ -260,13 +318,13 @@ def plot_trackman_plotly(
         initial_max_carry = float(df.loc[max_idx, "キャリー (yds)"])
         initial_max_x = int(df.loc[max_idx, "global_shot_no"])
 
-    # 最大キャリー強調用専用トレース（後からJSで動的に位置とテキストを書き換え）
+    # 最大値強調用専用トレース
     fig.add_trace(
         go.Scatter(
             x=[initial_max_x],
             y=[initial_max_carry],
             mode="text+markers",
-            text=[f"<b>Max: {int(round(initial_max_carry))} yds</b>"],
+            text=[f"<b>All-Time Max Carry: {int(round(initial_max_carry))} yds</b>"],
             textposition="top center",
             textfont=dict(size=13, color="#b71c1c"),
             marker=dict(
@@ -277,19 +335,23 @@ def plot_trackman_plotly(
             ),
             hoverinfo="skip",
             showlegend=False,
-            name="MaxCarryHighlight",
+            name="MaxHighlight",
         ),
         row=1,
         col=1,
     )
     max_trace_idx = len(fig.data) - 1
 
-    # JSでの高速最大値探索用ショットリスト
-    valid_shots = df[["global_shot_no", "キャリー (yds)"]].dropna()
-    shot_carry_list = [
-        {"x": int(r["global_shot_no"]), "carry": float(r["キャリー (yds)"])}
-        for _, r in valid_shots.iterrows()
-    ]
+    # 最大値探索用リスト（キャリーとトータルの両方を保持）
+    shot_dist_list = []
+    for _, r in df.iterrows():
+        c_val = r.get("キャリー (yds)")
+        t_val = r.get("トータル (yds)")
+        shot_dist_list.append({
+            "x": int(r["global_shot_no"]),
+            "carry": float(c_val) if pd.notna(c_val) else None,
+            "total": float(t_val) if pd.notna(t_val) else None,
+        })
 
     # 中心線 (0度) — 赤実線
     fig.add_hline(
@@ -358,7 +420,7 @@ def plot_trackman_plotly(
                 col=1,
             )
 
-        # --- クラブごとの詳細統計サマリーの生成 ---
+        # 統計サマリー
         club_stats_blocks = []
         for c_name in sub["Club-type"].unique():
             c_sub = sub[sub["Club-type"] == c_name]
@@ -366,23 +428,31 @@ def plot_trackman_plotly(
 
             # キャリー
             c_carry = c_sub["キャリー (yds)"].dropna()
-            c_max_carry = c_carry.max()
-            c_avg_carry = c_carry.mean()
-            c_sd_carry = c_carry.std()
-
             carry_str = "N/A"
             if not c_carry.empty:
+                c_max_carry = c_carry.max()
+                c_avg_carry = c_carry.mean()
+                c_sd_carry = c_carry.std()
                 sd_part = f" ± {c_sd_carry:.1f}" if pd.notna(c_sd_carry) else ""
                 carry_str = f"avg {c_avg_carry:.1f}{sd_part} yds (max {c_max_carry:.1f})"
 
+            # トータル
+            c_total = c_sub["トータル (yds)"].dropna()
+            total_str = "N/A"
+            if not c_total.empty:
+                c_max_total = c_total.max()
+                c_avg_total = c_total.mean()
+                c_sd_total = c_total.std()
+                sd_part = f" ± {c_sd_total:.1f}" if pd.notna(c_sd_total) else ""
+                total_str = f"avg {c_avg_total:.1f}{sd_part} yds (max {c_max_total:.1f})"
+
             # ボールスピード
             c_speed = c_sub["ボールスピード (m/s)"].dropna()
-            c_max_speed = c_speed.max()
-            c_avg_speed = c_speed.mean()
-            c_sd_speed = c_speed.std()
-
             speed_str = "N/A"
             if not c_speed.empty:
+                c_max_speed = c_speed.max()
+                c_avg_speed = c_speed.mean()
+                c_sd_speed = c_speed.std()
                 sd_part = f" ± {c_sd_speed:.1f}" if pd.notna(c_sd_speed) else ""
                 speed_str = f"avg {c_avg_speed:.1f}{sd_part} m/s (max {c_max_speed:.1f})"
 
@@ -407,6 +477,7 @@ def plot_trackman_plotly(
                 f"<div style='margin-bottom:6px;'>"
                 f"<b>【 {c_name} 】</b> ({n_c} shots)<br>"
                 f"  • <b>Carry:</b> {carry_str}<br>"
+                f"  • <b>Total:</b> {total_str}<br>"
                 f"  • <b>Speed:</b> {speed_str}<br>"
                 f"  • <b>Launch:</b> avg {launch_str} | <b>Horiz:</b> {horiz_str}"
                 f"</div>"
@@ -422,7 +493,7 @@ def plot_trackman_plotly(
         )
         daily_stats_dict[date_str] = stats_html
 
-        # 1段目 (Carry) 90° 回転背景日付
+        # 1段目 90° 回転背景日付
         fig.add_annotation(
             x=text_x,
             y=0.95,
@@ -435,7 +506,7 @@ def plot_trackman_plotly(
             xanchor="left",
             yanchor="top",
         )
-        # 2段目 (Angle) 90° 回転背景日付
+        # 2段目 90° 回転背景日付
         fig.add_annotation(
             x=text_x,
             y=0.95,
@@ -471,7 +542,7 @@ def plot_trackman_plotly(
         align="left",
     )
 
-    # --- 凡例1: Club-type ---
+    # --- 凡例 ---
     ordered_clubs = []
     for std_c in ["9i", "7i", "driver", "1w"]:
         for c in unique_clubs:
@@ -501,13 +572,11 @@ def plot_trackman_plotly(
             )
         )
 
-    # --- 凡例2: Peak Height ---
     for h in peak_height_samples:
         size_val = max(h, min_peak_height) * height_scale
         label_text = (
             f"≤ {min_peak_height} yds" if h <= min_peak_height else f"{h} yds"
         )
-
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -525,13 +594,11 @@ def plot_trackman_plotly(
             )
         )
 
-    # --- 凡例3: Launch Angle ---
     for a in launch_angle_samples:
         size_val = max(a, min_launch_angle) * launch_scale
         label_text = (
             f"≤ {min_launch_angle}°" if a <= min_launch_angle else f"{a}°"
         )
-
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -549,9 +616,9 @@ def plot_trackman_plotly(
             )
         )
 
-    # --- 軸設定 ---
+    # 軸設定（Y軸上限はトータル飛距離も考慮して170に設定）
     fig.update_yaxes(
-        title_text="Carry (yds)", range=[0, 160], fixedrange=True, row=1, col=1
+        title_text="Carry (yds)", range=[0, 170], fixedrange=True, row=1, col=1
     )
     fig.update_yaxes(
         title_text="Horiz. Launch Angle (deg)",
@@ -569,6 +636,7 @@ def plot_trackman_plotly(
 
     # --- ボタン ＆ ドロップダウン設定 ---
     updatemenus = [
+        # 1. ナビゲーションボタン群: <<, <, >, >>, +, -
         dict(
             type="buttons",
             direction="right",
@@ -578,10 +646,39 @@ def plot_trackman_plotly(
             yanchor="top",
             pad=dict(r=4, t=6),
             buttons=[
+                dict(label="<<", method="skip"),
                 dict(label="<", method="skip"),
                 dict(label=">", method="skip"),
+                dict(label=">>", method="skip"),
                 dict(label="+", method="skip"),
                 dict(label="-", method="skip"),
+            ],
+        ),
+        # 2. 距離モード切り替えスイッチ: Carry / Total
+        dict(
+            type="buttons",
+            direction="right",
+            x=0.20,
+            y=1.13,
+            xanchor="left",
+            yanchor="top",
+            pad=dict(r=4, t=6),
+            active=0,
+            buttons=[
+                dict(label="Carry", method="skip"),
+                dict(label="Total", method="skip"),
+            ],
+        ),
+        # 3. ツール操作ボタン: Pan, Zoom, Reset
+        dict(
+            type="buttons",
+            direction="right",
+            x=0.33,
+            y=1.13,
+            xanchor="left",
+            yanchor="top",
+            pad=dict(r=4, t=6),
+            buttons=[
                 dict(
                     label="Pan",
                     method="relayout",
@@ -604,10 +701,11 @@ def plot_trackman_plotly(
                 ),
             ],
         ),
+        # 4. 日付選択ドロップダウン
         dict(
             type="dropdown",
             direction="down",
-            x=0.38,
+            x=0.51,
             y=1.13,
             xanchor="left",
             yanchor="top",
@@ -638,17 +736,20 @@ def plot_trackman_plotly(
         margin=dict(t=120, b=60, l=80, r=170),
     )
 
-    # 永続的なグローバルイベントリスナー ＆ 幾何座標ベースの日付ホバー ＆ ドロップダウン同期 ＆ 画面内最大キャリー動的追従
+    # 永続的なグローバルイベントリスナー ＆ Carry/Total トレーススワップスクリプト
     post_script = f"""
     (function() {{
         var sessionRanges = {json.dumps(session_ranges)};
         var sessionMeta = {json.dumps(session_meta)};
         var dailyStats = {json.dumps(daily_stats_dict)};
-        var shotCarryList = {json.dumps(shot_carry_list)};
+        var shotDistList = {json.dumps(shot_dist_list)};
         var totalShots = {len(df) + 5};
         var maxTraceIdx = {max_trace_idx};
+        var carryTraceIndices = {json.dumps(carry_trace_indices)};
+        var totalTraceIndices = {json.dumps(total_trace_indices)};
 
-        // --- ドロップダウンメニューのラベル同期関数 ---
+        var currentDistMode = 'carry'; // 'carry' or 'total'
+
         function updateDropdownLabel(gd, targetRange) {{
             if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
             var curX0 = targetRange ? targetRange[0] : gd._fullLayout.xaxis.range[0];
@@ -684,8 +785,7 @@ def plot_trackman_plotly(
             }});
         }}
 
-        // --- 画面表示範囲の最大キャリーを探索してハイライトを移動 ---
-        function updateVisibleMaxCarry(gd, targetRange) {{
+        function updateVisibleMaxDist(gd, targetRange) {{
             if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
             var curX0 = targetRange ? targetRange[0] : gd._fullLayout.xaxis.range[0];
             var curX1 = targetRange ? targetRange[1] : gd._fullLayout.xaxis.range[1];
@@ -693,25 +793,29 @@ def plot_trackman_plotly(
 
             var maxShot = null;
             var maxVal = -Infinity;
-            for (var i = 0; i < shotCarryList.length; i++) {{
-                var s = shotCarryList[i];
+            var modeKey = currentDistMode;
+
+            for (var i = 0; i < shotDistList.length; i++) {{
+                var s = shotDistList[i];
                 if (s.x >= curX0 && s.x <= curX1) {{
-                    if (s.carry > maxVal) {{
-                        maxVal = s.carry;
+                    var val = s[modeKey];
+                    if (val !== null && val !== undefined && !isNaN(val) && val > maxVal) {{
+                        maxVal = val;
                         maxShot = s;
                     }}
                 }}
             }}
 
-            if (maxShot) {{
+            if (maxShot && maxVal > -Infinity) {{
                 var isDefault = (curSpan >= totalShots * 0.7);
+                var modeTitle = (currentDistMode === 'total') ? "Total" : "Carry";
                 var labelText = isDefault ? 
-                    ("<b>All-Time Max: " + Math.round(maxVal) + " yds</b>") : 
-                    ("<b>Max: " + Math.round(maxVal) + " yds</b>");
+                    ("<b>All-Time Max " + modeTitle + ": " + Math.round(maxVal) + " yds</b>") : 
+                    ("<b>Max " + modeTitle + ": " + Math.round(maxVal) + " yds</b>");
 
                 Plotly.restyle(gd, {{
                     'x': [[maxShot.x]],
-                    'y': [[maxShot.carry]],
+                    'y': [[maxVal]],
                     'text': [[labelText]],
                     'visible': true
                 }}, [maxTraceIdx]);
@@ -720,7 +824,31 @@ def plot_trackman_plotly(
             }}
         }}
 
-        // 1. ポップアップ要素の生成
+        // --- Carry トレース群と Total トレース群の visible を直接スワップ ---
+        function switchDistanceMode(gd, mode) {{
+            if (mode === currentDistMode) return;
+            currentDistMode = mode;
+
+            var showCarry = (mode === 'carry');
+            var yTitle = showCarry ? "Carry (yds)" : "Total (yds)";
+            var subTitle = showCarry ? "Carry & Peak Height" : "Total & Peak Height";
+
+            // Carry トレースの表示切替と Total トレースの表示切替を実行
+            Plotly.restyle(gd, {{ 'visible': showCarry }}, carryTraceIndices)
+            .then(function() {{
+                return Plotly.restyle(gd, {{ 'visible': !showCarry }}, totalTraceIndices);
+            }})
+            .then(function() {{
+                return Plotly.relayout(gd, {{
+                    'yaxis.title.text': yTitle,
+                    'annotations[0].text': subTitle
+                }});
+            }})
+            .then(function() {{
+                updateVisibleMaxDist(gd);
+            }});
+        }}
+
         var tooltip = document.createElement('div');
         tooltip.id = 'tm-date-tooltip';
         tooltip.style.position = 'fixed';
@@ -735,7 +863,6 @@ def plot_trackman_plotly(
         tooltip.style.maxWidth = '360px';
         document.body.appendChild(tooltip);
 
-        // 2. 日付ホバー判定
         document.addEventListener('mousemove', function(e) {{
             var gd = document.getElementsByClassName('plotly-graph-div')[0];
             if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
@@ -784,19 +911,26 @@ def plot_trackman_plotly(
             }}
         }});
 
-        // 3. ナビゲーションボタン操作 ＆ 同期
         document.addEventListener('click', function(e) {{
             var item = e.target.closest('g.updatemenu-item-group, g.updatemenu-button, .updatemenu-button');
             if (!item) return;
             var textEl = item.querySelector('text') || item;
             var txt = (textEl.textContent || '').trim();
-            if (['<', '>', '+', '-'].indexOf(txt) === -1) return;
-
-            e.preventDefault();
-            e.stopPropagation();
 
             var gd = document.getElementsByClassName('plotly-graph-div')[0];
             if (!gd || !gd._fullLayout || !gd._fullLayout.xaxis) return;
+
+            if (txt === 'Carry' || txt === 'Total') {{
+                e.preventDefault();
+                e.stopPropagation();
+                switchDistanceMode(gd, txt.toLowerCase());
+                return;
+            }}
+
+            if (['<<', '<', '>', '>>', '+', '-'].indexOf(txt) === -1) return;
+
+            e.preventDefault();
+            e.stopPropagation();
 
             var curX = gd._fullLayout.xaxis.range;
             var curCenter = (curX[0] + curX[1]) / 2;
@@ -815,7 +949,12 @@ def plot_trackman_plotly(
             }}
 
             var target = null;
-            if (txt === '>') {{
+
+            if (txt === '<<') {{
+                target = sessionRanges[0];
+            }} else if (txt === '>>') {{
+                target = sessionRanges[sessionRanges.length - 1];
+            }} else if (txt === '>') {{
                 if (isDefault) {{
                     target = sessionRanges[0];
                 }} else {{
@@ -847,12 +986,11 @@ def plot_trackman_plotly(
                     'xaxis2.range': target
                 }}).then(function() {{
                     updateDropdownLabel(gd, target);
-                    updateVisibleMaxCarry(gd, target);
+                    updateVisibleMaxDist(gd, target);
                 }});
             }}
         }}, true);
 
-        // 4. 手動ドラッグ(Pan/Zoom)・Reset時にも同期追従
         window.addEventListener('load', function() {{
             var gd = document.getElementsByClassName('plotly-graph-div')[0];
             if (gd && gd.on) {{
@@ -861,7 +999,7 @@ def plot_trackman_plotly(
                     clearTimeout(relayoutTimer);
                     relayoutTimer = setTimeout(function() {{
                         updateDropdownLabel(gd);
-                        updateVisibleMaxCarry(gd);
+                        updateVisibleMaxDist(gd);
                     }}, 60);
                 }});
             }}
